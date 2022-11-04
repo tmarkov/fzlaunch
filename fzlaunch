@@ -1,0 +1,160 @@
+#!/usr/bin/env python
+
+import subprocess
+import os
+import re
+import modules
+from modules.lib import history, config
+
+
+MODULES_DIR = os.path.dirname(modules.__file__)
+ENTRY_MANAGER = os.path.join(MODULES_DIR, "entry_manager.py")
+
+EOF_SIGNAL = "%%>>DONE<<%%"
+ENTER = "enter"
+REPLACE = "replace"
+TAB = "tab"
+ESCAPE = "escape"
+
+def fzf_command(header, socket, query):
+    return " ".join([
+        "fzf --border=rounded --reverse",
+        "--delimiter='%s' --with-nth=3.." % config.sep,
+        "--tiebreak=index",
+        "--print-query",
+        "--bind 'change:execute-silent(echo {q} >> %s)'" % socket,
+        "--bind 'enter:execute(echo %s)+accept'" % ENTER,
+        "--bind 'double-click:execute(echo %s)+accept'" % ENTER,
+        "--bind '`:execute(echo %s && echo -E {2})+abort'" % REPLACE,
+        "--bind 'tab:execute(echo %s)+accept'" % TAB,
+        "--preview='{1} {2}'"] +
+                    ([f" --header='{header}'"] if header else []) +
+                    ([f" --query='{query}'"] if query else [])
+        )
+
+
+def manager_command(types):
+    return "python {}{}".format(ENTRY_MANAGER, " " + types if types else "")
+
+
+def tail_command(socket):
+    return f"tail -n 1 -f {socket} 2> /dev/null"
+
+
+def get_item(command, marker, socket):
+    header = command if command != "{c}" else ""
+    types = marker.group(0)[1:-1] if marker else ""
+
+    feed_command = " | ".join([
+        tail_command(socket),
+        manager_command(types),
+        ])
+
+    print(feed_command)
+
+    feed = subprocess.Popen(feed_command, shell=True, stdout=subprocess.PIPE)
+    fzf_in = feed.stdout
+
+    result = [REPLACE, f"^;{types} " if len(types) == 1 else ""]
+    while len(result) != 0 and result[0] == REPLACE:
+        query = result[1]
+        print(fzf_command(header, socket, query))
+        fzrun = subprocess.run(
+                fzf_command(header, socket, query), shell=True,
+                stdin=fzf_in, stdout=subprocess.PIPE, text=True)
+        result = fzrun.stdout.strip().split("\n")
+        print(result)
+        fzf_in = None
+        print(fzrun.stdout)
+
+    with open(socket, 'a') as f:
+        f.write(EOF_SIGNAL)
+
+    feed.terminate()
+
+    if len(result) < 2:
+        return ESCAPE, None, None
+
+    key = result[0]
+
+    if len(result) >= 3:
+        preview, item, name = result[2].split(config.sep)
+        type = name[:2]
+        name = name[3:]
+    else:
+        preview = 'echo'
+        name = ''
+        item = ''
+        type = ';c'
+    
+    if item in result[1]:
+        item = result[1]
+        name = item
+
+    history.new_entry(preview, item, type, name)
+
+    return key, item, type
+
+
+def process_items(items):
+    curr_item = 0
+    stack = []
+
+    while curr_item < len(items):
+        item = items[curr_item]
+        curr_item += 1
+
+        while marker := re.search("{\w*}", item):     
+            if len(stack) > 0:
+                sub = stack.pop()
+            else:
+                if curr_item == len(items):
+                    break
+                sub = items[curr_item]
+                curr_item += 1
+
+            item = item.replace(marker.group(0), sub, 1)
+
+        stack.append(item)
+
+    return stack.pop()
+
+
+if __name__ == "__main__":
+    for i in range(1000):
+        socket = f"/tmp/fzlaunch{i}"
+        if not os.path.exists(socket):
+            break
+
+    subprocess.run(f"mkfifo {socket}", shell=True)
+
+    items = ["{}"]
+    command = "{}"
+    marker = re.search("{\w*}", command)
+
+    while True:
+        key, item, type = get_item(command, marker, socket)
+
+        if key == ESCAPE:
+            if len(items) <= 2:
+                os.remove(socket)
+                exit()
+            items.pop()
+
+        if key == TAB:
+            items.append(item)
+        
+        if key == ENTER:
+            items.append(item)
+            if len(items) <= 2:
+                items.append(config.default_actions[type])
+
+        command = process_items(items)
+        marker = re.search("{\w*}", command)
+
+        if key == ENTER and not marker:
+            break
+
+    print(command)
+
+    os.remove(socket)
