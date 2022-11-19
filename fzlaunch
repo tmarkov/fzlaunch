@@ -50,22 +50,17 @@ def get_item(command, marker, socket):
         manager_command(types),
         ])
 
-    print(feed_command)
-
     feed = subprocess.Popen(feed_command, shell=True, stdout=subprocess.PIPE)
     fzf_in = feed.stdout
 
     result = [REPLACE, f"^;{types} " if len(types) == 1 else ""]
     while len(result) != 0 and result[0] == REPLACE:
         query = result[1]
-        print(fzf_command(header, socket, query))
         fzrun = subprocess.run(
                 fzf_command(header, socket, query), shell=True,
                 stdin=fzf_in, stdout=subprocess.PIPE, text=True)
         result = fzrun.stdout.strip().split("\n")
-        print(result)
         fzf_in = None
-        print(fzrun.stdout)
 
     with open(socket, 'a') as f:
         f.write(EOF_SIGNAL)
@@ -156,5 +151,5 @@ if __name__ == "__main__":
             break
 
     print(command)
-
     os.remove(socket)
+    subprocess.Popen(command, shell=True)
