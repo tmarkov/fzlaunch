@@ -2,11 +2,14 @@
 
 import subprocess
 import os
+import sys
 import re
 import modules
+from xdg import BaseDirectory
 from modules.lib import history, config
 
 
+CACHE_DIR = BaseDirectory.save_cache_path("fzlaunch")
 MODULES_DIR = os.path.dirname(modules.__file__)
 ENTRY_MANAGER = os.path.join(MODULES_DIR, "entry_manager.py")
 
@@ -116,6 +119,7 @@ def process_items(items):
 
 
 if __name__ == "__main__":
+    sys.pycache_prefix = CACHE_DIR
     for i in range(1000):
         socket = f"/tmp/fzlaunch{i}"
         if not os.path.exists(socket):

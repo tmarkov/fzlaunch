@@ -6,6 +6,7 @@ from xdg import BaseDirectory
 
 FILE = __file__
 
+CACHE_DIR = BaseDirectory.save_cache_path("fzlaunch")
 DATA_DIR = BaseDirectory.save_data_path("fzlaunch")
 PROJECT_DIR = os.path.abspath(os.path.dirname(__file__))
 MODULE_DIRS = [
@@ -14,7 +15,6 @@ MODULE_DIRS = [
 ]
 
 EOF_SIGNAL = "%%>>DONE<<%%"
-
 
 def valid_type(allowed_types, module_types):
     if allowed_types == "":
@@ -37,6 +37,7 @@ def get_path(module):
 
 
 if __name__ == "__main__":
+    sys.pycache_prefix = CACHE_DIR
     if len(sys.argv) >= 2:
         types = sys.argv[1];
     else:
