@@ -1,23 +1,25 @@
 # Do not change this class
 class Module:
-    def __init__(self, filename, types, trigger=None, queried=False):
+    def __init__(self, filename, types, trigger=None, takes_query=False):
         self.filename = filename
         self.types = types
         self.trigger = trigger
-        self.queried = queried
+        self.takes_query = takes_query
 
 
 # You can change the following values
 modules = [
     Module("path.sh", "c"),
     Module("files.sh", "fd"),
-    Module("hidden.sh", "fd", ".")
+    Module("hidden.sh", "fd", "."),
+    Module("calculator.py", "t", "=", True),
 ] 
 
 default_actions = {
-    ';f': "xdg-open {}",
-    ';d': "xdg-open {}",
-    ';c': "{}"  # just run the command
+    ';f': "xdg-open {}", # File: open
+    ';d': "xdg-open {}", # Directory: open
+    ';c': "{}",  # Command: run
+    ';t': "echo '{}' | wl-copy", # Text: copy to clipboard
 }
 
 # Only change the separator if this doesn't work for some reason.

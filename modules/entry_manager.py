@@ -72,9 +72,14 @@ if __name__ == "__main__":
             kw = kw[:-1]
 
         for module in config.modules:
-            if module.trigger is not None and module.trigger in kw and valid_type(types, module.types):
+            if not valid_type(types, module.types) or module.trigger is None:
+                continue
+            if not module.takes_query and module.trigger in kw:
                 popens.append(subprocess.Popen(get_path(module), env=env))
                 module.trigger = None
+            if module.takes_query and len(kw) > 0 and kw[-1] == module.trigger:
+                query = l.strip()
+                popens.append(subprocess.Popen([get_path(module), query], env=env));
 
     for popen in popens:
         popen.wait()
