@@ -41,7 +41,7 @@ def fzf_command(header, socket, query):
 
 
 def manager_command(types):
-    return "python {}{}".format(ENTRY_MANAGER, " " + types if types else "")
+    return "{}{}".format(ENTRY_MANAGER, " " + types if types else "")
 
 
 def tail_command(socket):
