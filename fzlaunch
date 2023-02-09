@@ -19,6 +19,10 @@ REPLACE = "replace"
 TAB = "tab"
 ESCAPE = "escape"
 
+ENV = dict(os.environ)
+if "FZLAUNCH_EXTRA_PATH" in ENV:
+    ENV["PATH"] = ENV["PATH"] + ":" + ENV["FZLAUNCH_EXTRA_PATH"]
+
 def fzf_command(header, socket, query):
     return " ".join([
         "fzf --border=rounded --reverse",
@@ -54,7 +58,7 @@ def get_item(command, marker, socket):
         manager_command(types),
         ])
 
-    feed = subprocess.Popen(feed_command, shell=True, stdout=subprocess.PIPE)
+    feed = subprocess.Popen(feed_command, shell=True, stdout=subprocess.PIPE, env=ENV)
     fzf_in = feed.stdout
 
     result = [REPLACE, f"^;{types} " if len(types) == 1 else ""]
@@ -62,7 +66,7 @@ def get_item(command, marker, socket):
         query = result[1]
         fzrun = subprocess.run(
                 fzf_command(header, socket, query), shell=True,
-                stdin=fzf_in, stdout=subprocess.PIPE, text=True)
+                stdin=fzf_in, stdout=subprocess.PIPE, text=True, env=ENV)
         result = fzrun.stdout.strip().split("\n")
         fzf_in = None
 
