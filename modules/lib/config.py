@@ -16,8 +16,8 @@ modules = [
 ] 
 
 default_actions = {
-    ';f': "xdg-open {}", # File: open
-    ';d': "xdg-open {}", # Directory: open
+    ';f': "gtk-launch $(xdg-mime query default $(xdg-mime query filetype '{+}')) '{+}'", # File: open
+    ';d': "gtk-launch $(xdg-mime query default $(xdg-mime query filetype '{+}')) '{+}'", # Directory: open
     ';c': "{}",  # Command: run
     ';t': "echo '{}' | wl-copy", # Text: copy to clipboard
 }
