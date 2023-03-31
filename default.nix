@@ -51,6 +51,7 @@ stdenv.mkDerivation rec {
     cp -r $src $out/bin
     chmod +w $out/bin
     wrapProgram $out/bin/fzlaunch \
-      --set FZLAUNCH_EXTRA_PATH ${lib.makeBinPath buildInputs}
+      --set FZLAUNCH_EXTRA_PATH ${lib.makeBinPath buildInputs} \
+      --prefix PATH : ${gtk3}/bin
   '';
 }
