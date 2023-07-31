@@ -1,7 +1,6 @@
 { lib
 , stdenv
 , makeWrapper
-, fetchFromGitHub
 
 # for fzlaunch executable and entry_manager.py
 , bash
