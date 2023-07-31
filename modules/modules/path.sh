@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-find ${PATH//:/ } -maxdepth 1 -executable -printf "man$SEP%f$SEP;c %f\n" 2> /dev/null
+find -L ${PATH//:/ } -maxdepth 1 -executable -not -name ".*" -printf "man$SEP%f$SEP;c %f\n" 2> /dev/null
