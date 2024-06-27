@@ -30,10 +30,10 @@ def fzf_command(header, socket, query):
         "--tiebreak=index",
         "--print-query",
         "--bind 'change:execute-silent(echo {q} >> %s)'" % socket,
-        "--bind 'enter:execute(echo %s)+accept'" % ENTER,
-        "--bind 'double-click:execute(echo %s)+accept'" % ENTER,
-        "--bind '`:execute(echo %s && echo -E {2})+abort'" % REPLACE,
-        "--bind 'tab:execute(echo %s)+accept'" % TAB,
+        "--bind 'enter:print(%s)+accept'" % ENTER,
+        "--bind 'double-click:print(%s)+accept'" % ENTER,
+        "--bind '`:print(%s)+print({2})+accept'" % REPLACE,
+        "--bind 'tab:print(%s)+accept'" % TAB,
         "--preview='{1} {2}'"] +
                     ([f" --header='{header}'"] if header else []) +
                     ([f" --query='{query}'"] if query else [])
@@ -64,10 +64,15 @@ def get_item(command, marker, socket):
     result = [REPLACE, f"^;{types} " if len(types) == 1 else ""]
     while len(result) != 0 and result[0] == REPLACE:
         query = result[1]
+        cmd = fzf_command(header, socket, query);
+        print("command:", cmd)
         fzrun = subprocess.run(
-                fzf_command(header, socket, query), shell=True,
+                cmd, shell=True,
                 stdin=fzf_in, stdout=subprocess.PIPE, text=True, env=ENV)
-        result = fzrun.stdout.strip().split("\n")
+        result = fzrun.stdout.split("\n")
+        if len(result) >= 2:
+            result[0], result[1] = result[1], result[0]
+        print("result: ", result)
         fzf_in = None
 
     with open(socket, 'a') as f:
@@ -143,6 +148,9 @@ if __name__ == "__main__":
     marker = get_marker(command)
 
     while True:
+        print("--==--")
+        print(items)
+        print(command)
         key, item, type = get_item(command, marker, socket)
 
         if key == ESCAPE:
