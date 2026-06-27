@@ -10,6 +10,8 @@ pub enum InputMode {
 pub struct InputState {
     mode: InputMode,
     value: Value,
+    results: Vec<Value>,
+    selected_index: Option<usize>,
 }
 
 impl Default for InputState {
@@ -17,11 +19,18 @@ impl Default for InputState {
         Self {
             mode: InputMode::Search,
             value: Value::raw(""),
+            results: Vec::new(),
+            selected_index: None,
         }
     }
 }
 
 impl InputState {
+    pub fn feed(&mut self, values: impl IntoIterator<Item = Value>) {
+        self.results = values.into_iter().collect();
+        self.selected_index = (!self.results.is_empty()).then_some(0);
+    }
+
     pub fn press_tilde(&mut self) {
         self.mode = InputMode::Edit;
         self.value = Value::raw("");
@@ -33,6 +42,12 @@ impl InputState {
 
     pub fn value(&self) -> Value {
         self.value.clone()
+    }
+
+    pub fn selected(&self) -> Option<Value> {
+        self.selected_index
+            .and_then(|index| self.results.get(index))
+            .cloned()
     }
 }
 
