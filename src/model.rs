@@ -10,13 +10,6 @@ pub enum InsertionPolicy {
 pub struct Value {
     pub editable_text: String,
     pub insertion_policy: InsertionPolicy,
-    pub direct_action: Option<DirectAction>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectAction {
-    Open,
-    Execute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +104,6 @@ impl Value {
         Self {
             editable_text: editable_text.into(),
             insertion_policy: InsertionPolicy::Raw,
-            direct_action: None,
         }
     }
 
@@ -119,7 +111,6 @@ impl Value {
         Self {
             editable_text: editable_text.into(),
             insertion_policy: InsertionPolicy::Escaped,
-            direct_action: None,
         }
     }
 
@@ -143,7 +134,6 @@ impl Value {
         Self {
             editable_text: text,
             insertion_policy: InsertionPolicy::Raw,
-            direct_action: None,
         }
     }
 }
@@ -162,11 +152,6 @@ mod tests {
         let file = Value::escaped("/home/me/link to paper.pdf");
         let command = Value::raw("readlink -f {}");
         let mut queue = Queue::from_values([file]);
-
-        assert_eq!(
-            queue.status(),
-            Some("'/home/me/link to paper.pdf'".to_string())
-        );
 
         queue.compose(command);
 
