@@ -49,4 +49,16 @@ mod tests {
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw(""));
     }
+
+    #[test]
+    fn feed_adds_candidate_matches_and_selects_first_by_default() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Value::raw("firefox"),
+            Value::escaped("/home/me/Documents/research"),
+        ]);
+
+        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+    }
 }
