@@ -10,8 +10,25 @@ pub enum InputMode {
 pub struct InputState {
     mode: InputMode,
     value: Value,
+    candidates: Vec<Candidate>,
     results: Vec<Value>,
     selected_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    value: Value,
+    match_char: char,
+}
+
+impl Candidate {
+    pub fn new(value: Value, match_char: char) -> Self {
+        Self { value, match_char }
+    }
+
+    fn haystack(&self) -> String {
+        format!(";{} {}", self.match_char, self.value.editable_text)
+    }
 }
 
 impl Default for InputState {
@@ -19,6 +36,7 @@ impl Default for InputState {
         Self {
             mode: InputMode::Search,
             value: Value::raw(""),
+            candidates: Vec::new(),
             results: Vec::new(),
             selected_index: None,
         }
@@ -26,8 +44,40 @@ impl Default for InputState {
 }
 
 impl InputState {
-    pub fn feed(&mut self, values: impl IntoIterator<Item = Value>) {
-        self.results = values.into_iter().collect();
+    pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
+        self.candidates = candidates.into_iter().collect();
+        self.rerank();
+    }
+
+    pub fn type_char(&mut self, ch: char) {
+        self.value.editable_text.push(ch);
+        self.rerank();
+    }
+
+    fn rerank(&mut self) {
+        if self.value.editable_text.is_empty() {
+            self.results = self
+                .candidates
+                .iter()
+                .map(|candidate| candidate.value.clone())
+                .collect();
+        } else {
+            let haystacks = self
+                .candidates
+                .iter()
+                .map(Candidate::haystack)
+                .collect::<Vec<_>>();
+
+            self.results = frizbee::match_list(
+                &self.value.editable_text,
+                &haystacks,
+                &frizbee::Config::default(),
+            )
+            .into_iter()
+            .map(|matched| self.candidates[matched.index as usize].value.clone())
+            .collect();
+        }
+
         self.selected_index = (!self.results.is_empty()).then_some(0);
     }
 
@@ -90,8 +140,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Value::raw("firefox"),
-            Value::escaped("/home/me/Documents/research"),
+            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/me/Documents/research"), 'd'),
         ]);
 
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
@@ -101,11 +151,17 @@ mod tests {
     fn feeding_new_candidates_resets_selection_to_first_match() {
         let mut state = InputState::default();
 
-        state.feed([Value::raw("first"), Value::raw("second")]);
+        state.feed([
+            Candidate::new(Value::raw("first"), 'c'),
+            Candidate::new(Value::raw("second"), 'c'),
+        ]);
         state.select_next();
         assert_eq!(state.selected(), Some(Value::raw("second")));
 
-        state.feed([Value::raw("new-first"), Value::raw("new-second")]);
+        state.feed([
+            Candidate::new(Value::raw("new-first"), 'c'),
+            Candidate::new(Value::raw("new-second"), 'c'),
+        ]);
 
         assert_eq!(state.selected(), Some(Value::raw("new-first")));
     }
@@ -114,10 +170,27 @@ mod tests {
     fn selection_can_move_back_to_previous_match() {
         let mut state = InputState::default();
 
-        state.feed([Value::raw("first"), Value::raw("second")]);
+        state.feed([
+            Candidate::new(Value::raw("first"), 'c'),
+            Candidate::new(Value::raw("second"), 'c'),
+        ]);
         state.select_next();
         state.select_previous();
 
         assert_eq!(state.selected(), Some(Value::raw("first")));
+    }
+
+    #[test]
+    fn character_input_reranks_candidates_by_haystack_and_resets_selection() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/user/files/firefox"), 'f'),
+            Candidate::new(Value::raw("firefox"), 'c'),
+        ]);
+        state.type_char(';');
+        state.type_char('c');
+
+        assert_eq!(state.selected(), Some(Value::raw("firefox")));
     }
 }

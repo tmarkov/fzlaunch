@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 mod app;
-mod fuzzy;
 mod input;
 mod model;
 mod shell;
