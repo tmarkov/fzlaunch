@@ -151,6 +151,10 @@ mod tests {
     use super::*;
     use crate::shell::render_value;
 
+    fn compile_text(queue: &Queue) -> String {
+        render_value(&queue.compile().expect("queue should compile"))
+    }
+
     #[test]
     fn fills_slot_with_escaped_value_and_produces_raw_shell_fragment() {
         let file = Value::escaped("/home/me/link to paper.pdf");
@@ -187,5 +191,124 @@ mod tests {
         queue.compose(Value::raw("readlink -f {}"));
 
         assert_eq!(queue.compile(), Err(CompileError::UnfilledSlots));
+    }
+
+    #[test]
+    fn compiles_file_argument_with_chosen_program() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::escaped(
+            "/home/me/Documents/research/2024-polynomial-interpolation.pdf",
+        ));
+        queue.compose(Value::raw("evince"));
+
+        assert_eq!(
+            compile_text(&queue),
+            "evince '/home/me/Documents/research/2024-polynomial-interpolation.pdf'"
+        );
+    }
+
+    #[test]
+    fn composes_move_and_rename_with_two_slots() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::escaped("/home/me/Downloads/2024-8234.pdf"));
+        queue.compose(Value::raw("securemove {} {}"));
+
+        assert_eq!(
+            queue.status(),
+            Some("securemove '/home/me/Downloads/2024-8234.pdf' {}".into())
+        );
+
+        queue.compose(Value::escaped(
+            "/home/me/Documents/research/2024-polynomial-interpolation.pdf",
+        ));
+
+        assert_eq!(
+            compile_text(&queue),
+            "securemove '/home/me/Downloads/2024-8234.pdf' '/home/me/Documents/research/2024-polynomial-interpolation.pdf'"
+        );
+    }
+
+    #[test]
+    fn current_value_with_multiple_slots_consumes_queued_values_fifo() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::raw("src"));
+        queue.compose(Value::raw("dest"));
+        queue.compose(Value::raw("mv {} {}"));
+
+        assert_eq!(compile_text(&queue), "mv src dest");
+    }
+
+    #[test]
+    fn composes_nested_shell_fragments() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::escaped("/home/me/link to paper.pdf"));
+        queue.compose(Value::raw("readlink -f {}"));
+        queue.compose(Value::raw("nvim $({})"));
+
+        assert_eq!(
+            compile_text(&queue),
+            "nvim $(readlink -f '/home/me/link to paper.pdf')"
+        );
+    }
+
+    #[test]
+    fn preserves_slots_through_composition_until_later_fill() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::raw("readlink -f {}"));
+        queue.compose(Value::raw("nvim $({})"));
+
+        assert_eq!(queue.status(), Some("nvim $(readlink -f {})".into()));
+        assert_eq!(queue.compile(), Err(CompileError::UnfilledSlots));
+
+        queue.compose(Value::escaped("/home/me/link to paper.pdf"));
+
+        assert_eq!(
+            compile_text(&queue),
+            "nvim $(readlink -f '/home/me/link to paper.pdf')"
+        );
+    }
+
+    #[test]
+    fn brackets_slotted_value() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::raw("bar"));
+        queue.compose(Value::raw("echo {{}}"));
+
+        assert_eq!(compile_text(&queue), "echo {bar}");
+    }
+
+    #[test]
+    fn escaped_value_with_single_quote_is_quoted_when_slotted() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::escaped("/home/me/a'b.txt"));
+        queue.compose(Value::raw("cat {}"));
+
+        assert_eq!(compile_text(&queue), "cat '/home/me/a'\\''b.txt'");
+    }
+
+    #[test]
+    fn empty_escaped_value_is_rendered_as_empty_shell_string() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::escaped(""));
+        queue.compose(Value::raw("printf %s {}"));
+
+        assert_eq!(compile_text(&queue), "printf %s ''");
+    }
+
+    #[test]
+    fn non_slot_braces_are_literal() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::raw("echo {file}"));
+
+        assert_eq!(compile_text(&queue), "echo {file}");
     }
 }
