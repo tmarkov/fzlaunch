@@ -45,13 +45,16 @@ impl Default for InputState {
 
 impl InputState {
     pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
-        self.candidates = candidates.into_iter().collect();
+        self.candidates.extend(candidates);
         self.rerank();
     }
 
     pub fn type_char(&mut self, ch: char) {
         self.value.editable_text.push(ch);
-        self.rerank();
+
+        if self.mode == InputMode::Search {
+            self.rerank();
+        }
     }
 
     fn rerank(&mut self) {
@@ -104,6 +107,8 @@ impl InputState {
     pub fn press_tilde(&mut self) {
         self.mode = InputMode::Edit;
         self.value = Value::raw("");
+        self.results.clear();
+        self.selected_index = None;
     }
 
     pub fn mode(&self) -> InputMode {
@@ -163,7 +168,7 @@ mod tests {
             Candidate::new(Value::raw("new-second"), 'c'),
         ]);
 
-        assert_eq!(state.selected(), Some(Value::raw("new-first")));
+        assert_eq!(state.selected(), Some(Value::raw("first")));
     }
 
     #[test]
