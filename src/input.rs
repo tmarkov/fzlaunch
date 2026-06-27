@@ -31,6 +31,16 @@ impl InputState {
         self.selected_index = (!self.results.is_empty()).then_some(0);
     }
 
+    pub fn select_next(&mut self) {
+        let Some(index) = self.selected_index else {
+            return;
+        };
+
+        if index + 1 < self.results.len() {
+            self.selected_index = Some(index + 1);
+        }
+    }
+
     pub fn press_tilde(&mut self) {
         self.mode = InputMode::Edit;
         self.value = Value::raw("");
@@ -75,5 +85,18 @@ mod tests {
         ]);
 
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
+    }
+
+    #[test]
+    fn feeding_new_candidates_resets_selection_to_first_match() {
+        let mut state = InputState::default();
+
+        state.feed([Value::raw("first"), Value::raw("second")]);
+        state.select_next();
+        assert_eq!(state.selected(), Some(Value::raw("second")));
+
+        state.feed([Value::raw("new-first"), Value::raw("new-second")]);
+
+        assert_eq!(state.selected(), Some(Value::raw("new-first")));
     }
 }
