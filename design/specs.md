@@ -1,93 +1,583 @@
 # Overview
 
-`fzlaunch` is a search-first, object-verb linux launcher focused on minimizing the keystrokes necessary to execute an action, and the amount of data the user needs to have memorized (e.g. commands).
+`fzlaunch` is a search-first, object-verb Linux launcher focused on minimizing
+the keystrokes necessary to execute an action, and the amount of shell syntax,
+paths, command names, and flags the user needs to have memorized.
 
-# Startup
+The core interaction is:
 
-When started, fzlaunch opens a TUI with the following:
-1. Search box: Text box with the cursor in it, for input of search terms. On top.
-2. Status line: Text showing the current command composition. Below the search box, only visible if there is anything to show.
-3. Result box: A box with a list of sorted matching items, with one item (first by default) selected. Left half below the status line. Best match on top.
-4. Preview box: A box showing a preview of the currently selected item. The exact nature of the preview depends on the item. Hideable. Visible by default. Right half below the status line. If hidden, the result box expands to full width.
+1. Search for a value.
+2. Optionally edit that value.
+3. Optionally queue it.
+4. Compose it with another value.
+5. Execute the resulting shell command.
 
-# User actions
+The launcher is intentionally shell-oriented. Its observable behavior is that it
+constructs a command with shell-equivalent semantics and executes it. The exact
+process API used by an implementation is not part of this spec.
 
-1. Text input: Modify text in the search box. Results adjust live.
-2. Up/down: Move selection in the results box. Preview adjusts live. Text input resets the selection to top match.
-3. Tilde "`": Move selected item to the search box.
-4. Tab: Enqueue current item
-5. Enter: Execute current item
-6. ctrl-P: Show/hide preview.
+# UI
 
-Search box is normally the selected item. However, if there are no matches, or if the selected item is a prefix of the search box text, it's the search box text.
+When started, `fzlaunch` opens a TUI with:
 
-# Workflow
+1. Search box: text input with the cursor in it. It is always at the top.
+2. Status line: the current queue/command composition, shown as final shell text.
+   It is hidden when there is nothing to show.
+3. Result box: sorted matching values, with one value selected. The best match is
+   selected by default.
+4. Preview box: a preview of the selected value. It is visible by default and can
+   be hidden. When hidden, the result box expands to full width.
 
-The main idea is to allow the user to compose actions in an object-verb action model, and then execute them. This is done using the queueing mechanism. It's best to explain the workflow by examples.
+# Values
 
-Each example will contain a keystroke sequence, and then an explanation of the intended result.
-We'll use the literal characters for alphanumeric inputs, [ent] for enter, _ for space (to make it obvious).
+Everything that can be selected, queued, inserted, or executed is a value.
 
-Let's start with the simplest use case: run an application or open a file:
+A value has:
 
-1. fir[ent]: launch firefox (assuming that's the best match at "fir")
-2. docrespoly[ent]: open `~/Documents/research/2024-polynomial-interpolation.pdf` (again, assuming this is the best match)
-3. docrespoly[down][ent]: open the same file, if it's actually the second best match for "docrespoly".
+1. Editable text: what appears in the search box after `[tilde]`.
+2. Insertion policy: how the value is inserted into shell text.
+3. Optional direct action: how the value is executed when it is the whole action.
 
-But often, we want to execute something more complex than that: for example, we might want to provide command line arguments for a program. Suppose we don't have a default document reader set up, and so must specify that we want to open that document with evince. Then we use:
+There are two insertion policies:
 
-3. docrespoly[tab]evin[ent]: This works as follows:
-  - "docrespoly": find `~/Documents/research/2024-polynomial-interpolation.pdf`
-  - [tab]: queue the file, and start a new search. At this point, the status line shows "~/Documents/research/2024-polynomial-interpolation.pdf".
-  - "evin": find evince
-  - [ent]: execute the composed command, which is `evince ~/Documents/...`
+1. `Raw`: insert the value verbatim.
+2. `Escaped`: insert the value using POSIX shell quoting.
 
-Now lets consider what might happen if we want to run a command with two arguments. Suppose we have a `securemove` binary that acts like `mv`, but with additional checks. We've downloaded the polynomial interpolation paper in `~/Downlaods/2024-8234.pdf`, and want to move it to a better place with a different name.
+Examples:
 
-4. 2024pdf[down][tab]secm[tilde]_{}_{}[tab];ddocres[tilde]/2024-polynomial-interpolation.pdf[ent]: This works as follows:
-  - "2024pdf[down]": select the file, `~/Downloads/2024-8234.pdf`
-  - [tab]: queue the file. Now the status line shows it, and we start a new search
-  - "secm": select the `securemove` command.
-  - "_{}_{}": now the search box reads "securemove {} {}". The "{}" are called "slots".
-  - [tab]: Since the command has slots in it, we first do pop from the queue, and fill the flots. In this case, we only fill the first slot. Then we queue it. Now the status line is "securemove ~/Downloads/2024-8234.pdf {}"
-  - ;ddocres: select the directory `~/Documents/research`, `;d` is a special matcher for directories
-  - [tilde]: move it to the search box
-  - "/2024-polynomial-interpolation.pdf" - append a filename to the path, since we also want to rename the file
-  - [ent]: Normally, we would unqueue and place the queue items as command line arguments, then execute. But in this case, we see that the queueed item has unfilled slots, so we use the current item to fill the slots instead. Then we execute.
+| Value | Source | Editable text | Insertion policy | Inserted shell text |
+| --- | --- | --- | --- | --- |
+| Firefox command | executables | `firefox` | `Raw` | `firefox` |
+| File | files | `/home/me/a b.pdf` | `Escaped` | `'/home/me/a b.pdf'` |
+| Directory | directories | `/home/me/Documents` | `Escaped` | `'/home/me/Documents'` |
+| Composed command | composition | `readlink -f '/tmp/a b'` | `Raw` | `readlink -f '/tmp/a b'` |
+| Typed shell command | user text | `ps aux \| grep firefox` | `Raw` | `ps aux \| grep firefox` |
 
-We can also do more complex things like:
+Sources choose the insertion policy for each value they produce. The built-in
+file and directory sources produce `Escaped` values. The built-in executable
+source normally produces `Raw` values for command names found on `$PATH`.
 
-5. ;ffilename[tab];creadl[tilde]_-f_{}[tab]nvim_$({})[ent]: executes `nvim $(readlink -f /path/to/ilename)`
+If an executable source returns a filesystem path that must be quoted, it should
+produce an `Escaped` value instead. The source owns that choice.
 
-`;f` matches files, `;d` - directories, and `;c` - executables
+# Direct actions
 
-# Rules
+Some values are useful to execute directly even though their insertion text is
+not itself a useful command.
 
-1. We either have one queueed item with unfilled slots, or any number of queueed items
-2. When we queue an item, if it has slots, we unqueue until we fill them, or the queue runs out. Then we queue.
-3. When we execute an item, we take everything from the queue as command line arguments, unless the queue item has slots - then we slot the current item instead.
-  - if we try to execute, and the queued item has more slots, we only fill one slot, then proceed as if [tab] was entered.
+For example, a file should be inserted as:
+
+```sh
+'/home/me/paper.pdf'
+```
+
+when it is used as an argument, but pressing `[ent]` on that file should open it,
+not try to execute the file path as a program.
+
+To support that, a source may provide a direct action for a value. A direct
+action is only used when the value is executed as the whole action, with no queue
+and no surrounding command text.
+
+Built-in direct actions:
+
+1. Files: open with the configured file opener, e.g. shell-equivalent
+   `xdg-open {}`.
+2. Directories: open with the configured directory opener, e.g. shell-equivalent
+   `xdg-open {}`.
+3. Executables: execute the value itself.
+
+Direct actions do not affect slot insertion or argument insertion. A file queued
+before `evince` is still inserted as a quoted path, not as `xdg-open 'path'`.
+
+# Modes
+
+`fzlaunch` has two input modes.
+
+## Search mode
+
+This is the startup mode.
+
+Typing changes the search query. Results update live. Text input resets the
+selection to the top match.
+
+`[up]` and `[down]` move the selected result. The preview updates live.
+
+In search mode, `[tab]` and `[ent]` first resolve the current value:
+
+1. If there are no matches, the current value is the search-box text as `Raw`.
+2. If the selected result's editable text is a proper prefix of the search-box
+   text, the current value is the search-box text as `Raw`.
+3. Otherwise, the current value is the selected result.
+
+Examples:
+
+```text
+fir[ent]
+```
+
+`firefox` is selected, and `firefox` is not a prefix of `fir`, so this executes
+the selected `firefox` value.
+
+```text
+firefox --private-window[ent]
+```
+
+The selected value is `firefox`, and its editable text is a proper prefix of the
+search-box text. The typed buffer wins, so this executes:
+
+```sh
+firefox --private-window
+```
+
+```text
+ps aux | grep firefox[ent]
+```
+
+If this matches a strangely named file, the selected file would normally win. To
+force direct shell entry, use initial `[tilde]`:
+
+```text
+[tilde]ps aux | grep firefox[ent]
+```
+
+## Edit mode
+
+`[tilde]` enters edit mode.
+
+Normally, `[tilde]`:
+
+1. Copies the selected value's editable text into the search box.
+2. Preserves that value's insertion policy.
+3. Clears/ignores the result list.
+
+Subsequent typing edits that value directly. It does not produce new matches.
+
+Example:
+
+```text
+;ddocres[tilde]/2024-polynomial-interpolation.pdf
+```
+
+If `;ddocres` selects `/home/me/Documents/research`, the search box becomes:
+
+```text
+/home/me/Documents/research/2024-polynomial-interpolation.pdf
+```
+
+The buffer still has the directory value's `Escaped` insertion policy, so when it
+is inserted into shell text, it becomes:
+
+```sh
+'/home/me/Documents/research/2024-polynomial-interpolation.pdf'
+```
+
+The one explicit exception is initial `[tilde]`: if the search box is empty when
+`[tilde]` is pressed, it enters edit mode with an empty `Raw` buffer and does not
+copy the selected result.
+
+Example:
+
+```text
+[tilde]ps aux | grep firefox[ent]
+```
+
+executes the typed raw shell command.
+
+# Slots
+
+A slot is the exact substring:
+
+```text
+{}
+```
+
+Only that exact substring is a slot.
+
+Examples:
+
+```text
+{}
+```
+
+contains one slot.
+
+```text
+{{}}
+```
+
+also contains one slot. The slot is the inner `{}`, so filling it with `x`
+produces:
+
+```text
+{x}
+```
+
+```text
+{file}
+```
+
+contains no slots.
+
+When a value is inserted into a slot:
+
+1. `Raw` values are inserted verbatim.
+2. `Escaped` values are inserted using POSIX shell quoting.
+
+Slot filling always produces a new `Raw` value. Any remaining slots stay in the
+new value.
+
+Typing `{` in search mode first resolves the current value, enters edit mode with
+that value, then inserts `{`. This makes common command composition short:
+
+```text
+mv {} {}
+```
+
+The first `{` resolves `mv ` as the current value, enters edit mode with that
+raw buffer, and then appends `{`.
+
+# Queue and composition
+
+The queue is FIFO.
+
+`[tab]` resolves the current value, composes it with queued values if possible,
+then queues the result.
+
+`[ent]` resolves the current value, composes it with queued values if possible,
+then executes if the resulting command is complete. If the result still has open
+slots, `[ent]` behaves like `[tab]` and leaves the incomplete value queued.
+
+The composition rule is:
+
+1. If the current value has slots, queued values are slotted into the current
+   value from oldest to newest.
+2. If the current value has no slots, but the oldest queued value has slots, the
+   current value is slotted into that queued value.
+3. If neither side has slots, queued values become command-line arguments to the
+   current value when `[ent]` is pressed.
+
+This rule means that when both the queued value and the new value have slots, the
+queued value is inserted into the new value.
+
+Argument insertion uses the same insertion policy as slot insertion. `Raw`
+arguments are appended verbatim. `Escaped` arguments are shell-quoted. Direct
+actions are not used for queued arguments.
+
+Slot filling consumes queued values. If the current value runs out of slots
+before the queue is empty, the remaining queued values stay queued. On `[ent]`,
+those remaining queued values are appended as command-line arguments to the
+completed current value.
+
+Example:
+
+```text
+readlink -f {}[tab]nvim $({})[tab]
+```
+
+After the first `[tab]`, the queue contains:
+
+```sh
+readlink -f {}
+```
+
+The new value is:
+
+```sh
+nvim $({})
+```
+
+Both values have slots, so the queued value is inserted into the new value:
+
+```sh
+nvim $(readlink -f {})
+```
+
+Example with more queued values than slots:
+
+```text
+a[tab]b[tab]cmd {}[ent]
+```
+
+If `a` and `b` are raw values, final command:
+
+```sh
+cmd a b
+```
+
+# Examples
+
+## Run an application
+
+```text
+fir[ent]
+```
+
+If the best match for `fir` is `firefox`, this executes:
+
+```sh
+firefox
+```
+
+## Open a file directly
+
+```text
+docrespoly[ent]
+```
+
+If the best match is:
+
+```text
+/home/me/Documents/research/2024-polynomial-interpolation.pdf
+```
+
+then the file source's direct action opens that file, for example with:
+
+```sh
+xdg-open '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
+```
+
+## Open a selected file with a chosen program
+
+```text
+docrespoly[tab]evin[ent]
+```
+
+Step by step:
+
+1. `docrespoly` selects the PDF.
+2. `[tab]` queues the PDF as an `Escaped` value.
+3. `evin` selects `evince`.
+4. `[ent]` executes the current value with the queue as arguments.
+
+Final command:
+
+```sh
+evince '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
+```
+
+## Display raw paths but preview escaped shell text
+
+Suppose a selected file has this editable text:
+
+```text
+/home/me/a'b.txt
+```
+
+After `[tilde]`, the search box shows that raw editable path. It does not show
+the shell-escaped form.
+
+When the value is queued or previewed as final shell text, it is shown escaped:
+
+```sh
+'/home/me/a'\''b.txt'
+```
+
+## Add arguments to a command by typing past the selected prefix
+
+```text
+firefox --private-window[ent]
+```
+
+The selected value `firefox` is a proper prefix of the typed buffer, so the typed
+buffer wins and executes as `Raw` shell text:
+
+```sh
+firefox --private-window
+```
+
+The same resolution is used for `[tab]`:
+
+```text
+firefox --private-window[tab]
+```
+
+queues the `Raw` value:
+
+```sh
+firefox --private-window
+```
+
+## Type a raw shell command directly
+
+```text
+[tilde]ps aux | grep firefox[ent]
+```
+
+Initial `[tilde]` enters edit mode with an empty `Raw` buffer. The command
+executes as typed:
+
+```sh
+ps aux | grep firefox
+```
+
+## Move and rename a file with slots
+
+Suppose:
+
+1. `2024pdf` selects `/home/me/Downloads/2024-8234.pdf`.
+2. `secm` selects the command `securemove`.
+3. `;ddocres` selects `/home/me/Documents/research`.
+
+Then:
+
+```text
+2024pdf[tab]secm[tilde] {} {}[tab];ddocres[tilde]/2024-polynomial-interpolation.pdf[ent]
+```
+
+Step by step:
+
+1. `2024pdf[tab]` queues the downloaded PDF as an `Escaped` value.
+2. `secm[tilde]` seeds the buffer with `securemove`.
+3. ` {} {}` edits it into a `Raw` value with two slots.
+4. `[tab]` fills the first slot from the queue and queues:
+
+```sh
+securemove '/home/me/Downloads/2024-8234.pdf' {}
+```
+
+5. `;ddocres[tilde]` enters edit mode with the selected directory as an
+   `Escaped` value.
+6. `/2024-polynomial-interpolation.pdf` edits that value.
+7. `[ent]` fills the remaining slot and executes:
+
+```sh
+securemove '/home/me/Downloads/2024-8234.pdf' '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
+```
+
+## Compose nested shell fragments
+
+Suppose `;ffilename` selects:
+
+```text
+/home/me/link to paper.pdf
+```
+
+Then:
+
+```text
+;ffilename[tab]readlink -f {}[tab]nvim $({})[ent]
+```
+
+Step by step:
+
+1. The file is queued as an `Escaped` value.
+2. `readlink -f {` resolves the typed buffer `readlink -f ` as `Raw`, enters
+   edit mode, and then appends `{`.
+3. `[tab]` fills the slot with the queued file and queues:
+
+```sh
+readlink -f '/home/me/link to paper.pdf'
+```
+
+4. `nvim $({})[ent]` inserts that queued `Raw` shell fragment into the new
+   command and executes:
+
+```sh
+nvim $(readlink -f '/home/me/link to paper.pdf')
+```
+
+## Preserve slots through composition
+
+```text
+readlink -f {}[tab]nvim $({})[tab]
+```
+
+queues:
+
+```sh
+nvim $(readlink -f {})
+```
+
+The remaining slot can be filled later:
+
+```text
+;ffilename[ent]
+```
+
+Final command:
+
+```sh
+nvim $(readlink -f '/home/me/link to paper.pdf')
+```
+
+## Bracket a slotted value
+
+```text
+foo[tab]echo {{}}[ent]
+```
+
+If `foo` selects a `Raw` value `bar`, final command:
+
+```sh
+echo {bar}
+```
 
 # Sources
 
-We have three built-in sources:
-- files
-- directories
-- executables
+Built-in sources:
 
-Each source has a "match character". For files this is "f", for directories - "d", and for executables, "c".
+1. Files
+2. Directories
+3. Executables
 
-We have two types of sources:
-- default: They always output items. Including `;x` increases the score for items output by a source with matching character "x"
-- triggered: They are triggered when ";x", where "x" is a matching character, is entered into the search box. They receive what's in the search bot at the time of trigger, and then output items
+Each source has a match character:
 
-For example:
-A triggered source might be a calculator, with a match character "=".
-Or a content indexer (e.g. `recoll`) with a match character "r".
-They need to already have search terms in order to output any items.
+1. Files: `f`
+2. Directories: `d`
+3. Executables: `c`
+
+There are two source kinds:
+
+1. Default sources always output values. Including `;x` in the query boosts
+   values from a source whose match character is `x`.
+2. Triggered sources only output values when `;x` appears in the query. They
+   receive the query text excluding the trigger.
+
+Examples:
+
+1. `;fpaper` searches files for `paper`.
+2. `;ddocres` searches directories for `docres`.
+3. `;creadl` searches executables for `readl`.
+
+Future triggered sources may include:
+
+1. Calculator, e.g. `;=`
+2. Content indexer, e.g. `;r`
+
+A calculator source for:
+
+```text
+1 + 3;=
+```
+
+could produce a top result like:
+
+```text
+4
+```
 
 # Sorting
 
-We sort my a simply fuzzy matching algorithm, like `fzf` does, as we need it to be fast. This is regardless of source.
+Results are sorted with a fast fuzzy matching algorithm similar to `fzf`.
 
-So, if we have a calculator source with a match character "=", and we enter "1 + 3;=", the calculator should output "1 + 3;= 4" so that the result is the top match.
+Source match characters affect scoring:
+
+1. For default sources, `;x` boosts matching-source values.
+2. For triggered sources, `;x` enables the source.
+
+The exact scoring formula is implementation-defined, but it must preserve the
+main interaction goal: the intended value should usually be reachable with very
+few typed characters.
+
+# Key bindings
+
+| Key | Behavior |
+| --- | --- |
+| Text input | Updates search in search mode; edits buffer in edit mode |
+| `[up]` / `[down]` | Move result selection |
+| `[tilde]` | Enter edit mode; normally seed from selected value |
+| Initial `[tilde]` | Enter edit mode with empty `Raw` buffer |
+| `{` in search mode | Resolve current value, enter edit mode, then insert `{` |
+| `[tab]` | Resolve, compose, and queue |
+| `[ent]` | Resolve, compose, and execute if complete |
+| `ctrl-P` | Show/hide preview |
