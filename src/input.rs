@@ -181,6 +181,33 @@ mod tests {
     }
 
     #[test]
+    fn selection_stays_at_last_match_when_moving_down_past_end() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("first"), 'c'),
+            Candidate::new(Value::raw("second"), 'c'),
+        ]);
+        state.select_next();
+        state.select_next();
+
+        assert_eq!(state.selected(), Some(Value::raw("second")));
+    }
+
+    #[test]
+    fn selection_stays_at_first_match_when_moving_up_past_start() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("first"), 'c'),
+            Candidate::new(Value::raw("second"), 'c'),
+        ]);
+        state.select_previous();
+
+        assert_eq!(state.selected(), Some(Value::raw("first")));
+    }
+
+    #[test]
     fn character_input_reranks_candidates_by_haystack_and_resets_selection() {
         let mut state = InputState::default();
 
@@ -192,5 +219,56 @@ mod tests {
         state.type_char('c');
 
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
+    }
+
+    #[test]
+    fn character_input_with_no_matches_clears_selection() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.type_char('z');
+        state.type_char('z');
+        state.type_char('z');
+
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn feed_appends_candidate_matches_from_multiple_sources() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("calculator"), 'c')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/user/files/paper.pdf"),
+            'f',
+        )]);
+        state.type_char(';');
+        state.type_char('c');
+
+        assert_eq!(state.selected(), Some(Value::raw("calculator")));
+    }
+
+    #[test]
+    fn character_input_in_edit_mode_edits_value_and_ignores_results() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.press_tilde();
+        state.type_char('f');
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw("f"));
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn initial_tilde_clears_existing_results() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.press_tilde();
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.selected(), None);
     }
 }
