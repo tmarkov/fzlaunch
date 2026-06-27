@@ -19,6 +19,12 @@ pub enum DirectAction {
     Execute,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileError {
+    Empty,
+    UnfilledSlots,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Queue {
     values: VecDeque<Value>,
@@ -35,34 +41,48 @@ impl Queue {
         }
     }
 
-    pub fn front(&self) -> Option<&Value> {
-        self.values.front()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
-    pub fn compose_for_queue(&mut self, current: Value) {
+    pub fn compose(&mut self, current: Value) {
         let current = self.compose_current(current);
         self.values.push_back(current);
     }
 
-    pub fn compose_for_execute(&mut self, current: Value) -> Value {
-        let current = self.compose_current(current);
-
+    pub fn status(&self) -> Option<String> {
         if self.values.is_empty() {
-            return current;
+            return None;
         }
 
-        let mut command = crate::shell::render_value(&current);
+        Some(
+            self.values
+                .iter()
+                .map(crate::shell::render_value)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
 
-        while let Some(value) = self.values.pop_front() {
-            command.push(' ');
-            command.push_str(&crate::shell::render_value(&value));
+    pub fn compile(&self) -> Result<Value, CompileError> {
+        let Some(current) = self.values.back() else {
+            return Err(CompileError::Empty);
+        };
+
+        if self.values.iter().any(Value::has_slots) {
+            return Err(CompileError::UnfilledSlots);
         }
 
-        Value::raw(command)
+        let mut parts = Vec::with_capacity(self.values.len());
+        parts.push(crate::shell::render_value(current));
+        parts.extend(
+            self.values
+                .iter()
+                .take(self.values.len() - 1)
+                .map(crate::shell::render_value),
+        );
+
+        Ok(Value::raw(parts.join(" ")))
     }
 
     fn compose_current(&mut self, current: Value) -> Value {
@@ -137,13 +157,16 @@ mod tests {
         let command = Value::raw("readlink -f {}");
         let mut queue = Queue::from_values([file]);
 
-        queue.compose_for_queue(command);
-        let composed = queue.front().expect("composed value should be queued");
-
-        assert_eq!(composed.insertion_policy, InsertionPolicy::Raw);
         assert_eq!(
-            render_value(&composed),
-            "readlink -f '/home/me/link to paper.pdf'"
+            queue.status(),
+            Some("'/home/me/link to paper.pdf'".to_string())
+        );
+
+        queue.compose(command);
+
+        assert_eq!(
+            queue.status(),
+            Some("readlink -f '/home/me/link to paper.pdf'".to_string())
         );
     }
 
@@ -151,9 +174,18 @@ mod tests {
     fn execute_fills_slots_then_appends_remaining_queue_values_as_arguments() {
         let mut queue = Queue::from_values([Value::raw("a"), Value::raw("b")]);
 
-        let command = queue.compose_for_execute(Value::raw("cmd {}"));
+        queue.compose(Value::raw("cmd {}"));
+        let command = queue.compile().expect("queue should compile");
 
         assert_eq!(render_value(&command), "cmd a b");
-        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn compile_fails_if_queue_has_unfilled_slots() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::raw("readlink -f {}"));
+
+        assert_eq!(queue.compile(), Err(CompileError::UnfilledSlots));
     }
 }
