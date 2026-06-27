@@ -41,6 +41,16 @@ impl InputState {
         }
     }
 
+    pub fn select_previous(&mut self) {
+        let Some(index) = self.selected_index else {
+            return;
+        };
+
+        if index > 0 {
+            self.selected_index = Some(index - 1);
+        }
+    }
+
     pub fn press_tilde(&mut self) {
         self.mode = InputMode::Edit;
         self.value = Value::raw("");
@@ -98,5 +108,16 @@ mod tests {
         state.feed([Value::raw("new-first"), Value::raw("new-second")]);
 
         assert_eq!(state.selected(), Some(Value::raw("new-first")));
+    }
+
+    #[test]
+    fn selection_can_move_back_to_previous_match() {
+        let mut state = InputState::default();
+
+        state.feed([Value::raw("first"), Value::raw("second")]);
+        state.select_next();
+        state.select_previous();
+
+        assert_eq!(state.selected(), Some(Value::raw("first")));
     }
 }
