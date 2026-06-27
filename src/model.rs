@@ -55,34 +55,19 @@ impl Queue {
             return None;
         }
 
-        Some(
-            self.values
-                .iter()
-                .map(crate::shell::render_value)
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
+        Some(render_command_order(&self.values))
     }
 
     pub fn compile(&self) -> Result<Value, CompileError> {
-        let Some(current) = self.values.back() else {
+        if self.values.is_empty() {
             return Err(CompileError::Empty);
-        };
+        }
 
         if self.values.iter().any(Value::has_slots) {
             return Err(CompileError::UnfilledSlots);
         }
 
-        let mut parts = Vec::with_capacity(self.values.len());
-        parts.push(crate::shell::render_value(current));
-        parts.extend(
-            self.values
-                .iter()
-                .take(self.values.len() - 1)
-                .map(crate::shell::render_value),
-        );
-
-        Ok(Value::raw(parts.join(" ")))
+        Ok(Value::raw(render_command_order(&self.values)))
     }
 
     fn compose_current(&mut self, current: Value) -> Value {
@@ -102,6 +87,23 @@ impl Queue {
 
         current
     }
+}
+
+fn render_command_order(values: &VecDeque<Value>) -> String {
+    let Some(current) = values.back() else {
+        return String::new();
+    };
+
+    let mut parts = Vec::with_capacity(values.len());
+    parts.push(crate::shell::render_value(current));
+    parts.extend(
+        values
+            .iter()
+            .take(values.len() - 1)
+            .map(crate::shell::render_value),
+    );
+
+    parts.join(" ")
 }
 
 impl Value {
@@ -191,6 +193,21 @@ mod tests {
         queue.compose(Value::raw("readlink -f {}"));
 
         assert_eq!(queue.compile(), Err(CompileError::UnfilledSlots));
+    }
+
+    #[test]
+    fn status_renders_current_command_before_queued_arguments() {
+        let mut queue = Queue::new();
+
+        queue.compose(Value::escaped(
+            "/home/me/Documents/research/2024-polynomial-interpolation.pdf",
+        ));
+        queue.compose(Value::raw("evince"));
+
+        assert_eq!(
+            queue.status(),
+            Some("evince '/home/me/Documents/research/2024-polynomial-interpolation.pdf'".into())
+        );
     }
 
     #[test]
