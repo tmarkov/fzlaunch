@@ -276,4 +276,42 @@ mod tests {
 
         assert_eq!(candidates, Vec::<Candidate>::new());
     }
+
+    #[test]
+    fn filesystem_file_candidates_feed_into_input_state() {
+        let root = temp_source_dir("filesystem-source-file-input-state");
+        let file = root.join("paper.pdf");
+        fs::write(&file, b"pdf").expect("test file should be written");
+        let mut state = InputState::default();
+
+        state.feed(super::filesystem_entries(&root));
+        state.update_input(Value::raw(";f"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw(format!(
+                "xdg-open '{}'",
+                file.to_str().expect("path should be utf-8")
+            )))
+        );
+    }
+
+    #[test]
+    fn filesystem_directory_candidates_feed_into_input_state() {
+        let root = temp_source_dir("filesystem-source-directory-input-state");
+        let dir = root.join("Documents");
+        fs::create_dir(&dir).expect("test directory should be created");
+        let mut state = InputState::default();
+
+        state.feed(super::filesystem_entries(&root));
+        state.update_input(Value::raw(";d"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw(format!(
+                "xdg-open '{}'",
+                dir.to_str().expect("path should be utf-8")
+            )))
+        );
+    }
 }
