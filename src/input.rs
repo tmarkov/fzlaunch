@@ -11,7 +11,7 @@ pub struct InputState {
     mode: InputMode,
     value: Value,
     candidates: Vec<Candidate>,
-    results: Vec<Value>,
+    results: Vec<Candidate>,
     selected_index: Option<usize>,
     queue: Queue,
 }
@@ -20,11 +20,16 @@ pub struct InputState {
 pub struct Candidate {
     value: Value,
     match_char: char,
+    direct_action: Option<Value>,
 }
 
 impl Candidate {
-    pub fn new(value: Value, match_char: char) -> Self {
-        Self { value, match_char }
+    pub fn new(value: Value, match_char: char, direct_action: Option<Value>) -> Self {
+        Self {
+            value,
+            match_char,
+            direct_action,
+        }
     }
 
     fn haystack(&self) -> String {
@@ -80,11 +85,7 @@ impl InputState {
 
     fn rerank(&mut self) {
         if self.value.editable_text.is_empty() {
-            self.results = self
-                .candidates
-                .iter()
-                .map(|candidate| candidate.value.clone())
-                .collect();
+            self.results = self.candidates.clone();
         } else {
             let haystacks = self
                 .candidates
@@ -98,7 +99,7 @@ impl InputState {
                 &frizbee::Config::default(),
             )
             .into_iter()
-            .map(|matched| self.candidates[matched.index as usize].value.clone())
+            .map(|matched| self.candidates[matched.index as usize].clone())
             .collect();
         }
 
@@ -153,6 +154,16 @@ impl InputState {
             return None;
         }
 
+        if self.queue.is_empty() {
+            if let Some(direct_action) = self
+                .selected_index
+                .and_then(|index| self.results.get(index))
+                .and_then(|candidate| candidate.direct_action.clone())
+            {
+                self.queue.compose(direct_action);
+            }
+        }
+
         self.queue.compose(current);
         let command = self.queue.compile();
 
@@ -196,7 +207,7 @@ impl InputState {
     pub fn selected(&self) -> Option<Value> {
         self.selected_index
             .and_then(|index| self.results.get(index))
-            .cloned()
+            .map(|candidate| candidate.value.clone())
     }
 
     fn reset_input_state(&mut self) {
@@ -225,8 +236,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::escaped("/home/me/Documents/research"), 'd'),
-            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/me/Documents/research"), 'd', None),
+            Candidate::new(Value::raw("firefox"), 'c', None),
         ]);
         state.update_input(Value::raw(";d"));
 
@@ -241,7 +252,7 @@ mod tests {
     fn search_input_without_prefix_resolves_to_selected_match() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("fir"));
 
         assert_eq!(state.current(), Value::raw("firefox"));
@@ -251,7 +262,7 @@ mod tests {
     fn search_input_extending_selected_match_resolves_to_raw_input() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("firefox --private-window"));
 
         assert_eq!(state.current(), Value::raw("firefox --private-window"));
@@ -261,7 +272,11 @@ mod tests {
     fn search_input_equal_to_selected_match_resolves_to_selected_value() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
         state.update_input(Value::raw("/home/me/paper.pdf"));
 
         assert_eq!(state.current(), Value::escaped("/home/me/paper.pdf"));
@@ -271,7 +286,7 @@ mod tests {
     fn search_input_with_no_matches_resolves_to_raw_input() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));
 
         assert_eq!(state.current(), Value::raw("ps aux | grep firefox"));
@@ -281,7 +296,11 @@ mod tests {
     fn edit_mode_current_value_is_input_value() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::escaped("/home/me/Documents"), 'd')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/Documents"),
+            'd',
+            None,
+        )]);
         state.update_input(Value::raw(";d"));
         state.press_tilde();
         state.update_input(Value::escaped("/home/me/Documents/paper.pdf"));
@@ -297,8 +316,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("firefox"), 'c'),
-            Candidate::new(Value::escaped("/home/me/Documents/research"), 'd'),
+            Candidate::new(Value::raw("firefox"), 'c', None),
+            Candidate::new(Value::escaped("/home/me/Documents/research"), 'd', None),
         ]);
 
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
@@ -309,15 +328,15 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("first"), 'c'),
-            Candidate::new(Value::raw("second"), 'c'),
+            Candidate::new(Value::raw("first"), 'c', None),
+            Candidate::new(Value::raw("second"), 'c', None),
         ]);
         state.select_next();
         assert_eq!(state.selected(), Some(Value::raw("second")));
 
         state.feed([
-            Candidate::new(Value::raw("new-first"), 'c'),
-            Candidate::new(Value::raw("new-second"), 'c'),
+            Candidate::new(Value::raw("new-first"), 'c', None),
+            Candidate::new(Value::raw("new-second"), 'c', None),
         ]);
 
         assert_eq!(state.selected(), Some(Value::raw("first")));
@@ -328,8 +347,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("first"), 'c'),
-            Candidate::new(Value::raw("second"), 'c'),
+            Candidate::new(Value::raw("first"), 'c', None),
+            Candidate::new(Value::raw("second"), 'c', None),
         ]);
         state.select_next();
         state.select_previous();
@@ -342,8 +361,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("first"), 'c'),
-            Candidate::new(Value::raw("second"), 'c'),
+            Candidate::new(Value::raw("first"), 'c', None),
+            Candidate::new(Value::raw("second"), 'c', None),
         ]);
         state.select_next();
         state.select_next();
@@ -356,8 +375,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("first"), 'c'),
-            Candidate::new(Value::raw("second"), 'c'),
+            Candidate::new(Value::raw("first"), 'c', None),
+            Candidate::new(Value::raw("second"), 'c', None),
         ]);
         state.select_previous();
 
@@ -400,8 +419,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::escaped("/home/user/files/firefox"), 'f'),
-            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/user/files/firefox"), 'f', None),
+            Candidate::new(Value::raw("firefox"), 'c', None),
         ]);
         state.update_input(Value::raw(";c"));
 
@@ -412,7 +431,7 @@ mod tests {
     fn update_input_with_no_matches_clears_selection() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("zzz"));
 
         assert_eq!(state.selected(), None);
@@ -422,10 +441,11 @@ mod tests {
     fn feed_appends_candidate_matches_from_multiple_sources() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("calculator"), 'c')]);
+        state.feed([Candidate::new(Value::raw("calculator"), 'c', None)]);
         state.feed([Candidate::new(
             Value::escaped("/home/user/files/paper.pdf"),
             'f',
+            None,
         )]);
         state.update_input(Value::raw(";c"));
 
@@ -436,7 +456,7 @@ mod tests {
     fn update_input_in_edit_mode_edits_value_and_ignores_results() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.press_tilde();
         state.update_input(Value::raw("f"));
 
@@ -450,8 +470,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::escaped("/home/user/files/firefox"), 'f'),
-            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/user/files/firefox"), 'f', None),
+            Candidate::new(Value::raw("firefox"), 'c', None),
         ]);
         state.select_next();
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
@@ -469,8 +489,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("firefox"), 'c'),
-            Candidate::new(Value::escaped("/home/me/firefox.pdf"), 'f'),
+            Candidate::new(Value::raw("firefox"), 'c', None),
+            Candidate::new(Value::escaped("/home/me/firefox.pdf"), 'f', None),
         ]);
         state.press_tilde();
 
@@ -486,7 +506,7 @@ mod tests {
     fn tilde_with_empty_input_ignores_selected_match() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.press_tilde();
 
         assert_eq!(state.mode(), InputMode::Edit);
@@ -498,7 +518,7 @@ mod tests {
     fn tilde_with_no_selected_match_keeps_typed_raw_input() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));
 
         state.press_tilde();
@@ -512,7 +532,7 @@ mod tests {
     fn left_brace_in_search_mode_enters_edit_mode_from_current_value() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("mv"), 'c')]);
+        state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.update_input(Value::raw("mv "));
 
         state.update_input(Value::raw("mv {"));
@@ -526,7 +546,7 @@ mod tests {
     fn left_brace_in_edit_mode_updates_input_without_search_resolution() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("mv"), 'c')]);
+        state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.press_tilde();
 
         state.update_input(Value::raw("{"));
@@ -540,7 +560,11 @@ mod tests {
     fn tab_composes_current_value_into_queue() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
         state.update_input(Value::raw(";f"));
 
         state.press_tab();
@@ -553,8 +577,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("firefox"), 'c'),
-            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
+            Candidate::new(Value::raw("firefox"), 'c', None),
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
         ]);
         state.update_input(Value::raw(";f"));
 
@@ -571,8 +595,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
-            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
+            Candidate::new(Value::raw("firefox"), 'c', None),
         ]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
@@ -598,7 +622,11 @@ mod tests {
     fn tab_with_command_slots_composes_from_queue() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
         state.update_input(Value::raw("readlink -f {}"));
@@ -615,7 +643,11 @@ mod tests {
     fn enter_composes_current_value_and_compiles_queue() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
         state.update_input(Value::raw("evince"));
@@ -631,8 +663,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("evince"), 'c'),
-            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
+            Candidate::new(Value::raw("evince"), 'c', None),
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
         ]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
@@ -657,8 +689,8 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::raw("firefox"), 'c'),
-            Candidate::new(Value::raw("evince"), 'c'),
+            Candidate::new(Value::raw("firefox"), 'c', None),
+            Candidate::new(Value::raw("evince"), 'c', None),
         ]);
         state.update_input(Value::raw("evince"));
         assert_eq!(state.press_enter(), Some(Value::raw("evince")));
@@ -713,7 +745,11 @@ mod tests {
 
         assert_eq!(state.queue_status(), None);
 
-        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
 
@@ -724,7 +760,11 @@ mod tests {
     fn enter_returns_execute_when_queue_compiles() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
         state.update_input(Value::raw("xdg-open"));
@@ -769,7 +809,7 @@ mod tests {
     fn tab_queues_typed_raw_command_extending_selected_prefix() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("firefox --private-window"));
 
         state.press_tab();
@@ -784,7 +824,7 @@ mod tests {
     fn left_brace_shortcut_preserves_slot_text() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("mv"), 'c')]);
+        state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.update_input(Value::raw("mv "));
         state.update_input(Value::raw("mv {}"));
 
@@ -797,7 +837,7 @@ mod tests {
     fn enter_with_no_matches_executes_typed_raw_input() {
         let mut state = InputState::default();
 
-        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));
 
         assert_eq!(
