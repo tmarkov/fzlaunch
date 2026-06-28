@@ -354,6 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn select_next_with_no_results_is_noop() {
+        let mut state = InputState::default();
+
+        state.select_next();
+
+        assert_eq!(state.selected(), None);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.mode(), InputMode::Search);
+    }
+
+    #[test]
+    fn select_previous_with_no_results_is_noop() {
+        let mut state = InputState::default();
+
+        state.select_previous();
+
+        assert_eq!(state.selected(), None);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.mode(), InputMode::Search);
+    }
+
+    #[test]
+    fn feed_empty_candidates_keeps_selection_empty_without_existing_candidates() {
+        let mut state = InputState::default();
+
+        state.feed([]);
+
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
     fn character_input_reranks_candidates_by_haystack_and_resets_selection() {
         let mut state = InputState::default();
 
