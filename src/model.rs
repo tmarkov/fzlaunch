@@ -12,12 +12,6 @@ pub struct Value {
     pub insertion_policy: InsertionPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompileError {
-    Empty,
-    UnfilledSlots,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Queue {
     values: VecDeque<Value>,
@@ -51,16 +45,12 @@ impl Queue {
         Some(render_command_order(&self.values))
     }
 
-    pub fn compile(&self) -> Result<Value, CompileError> {
-        if self.values.is_empty() {
-            return Err(CompileError::Empty);
+    pub fn compile(&self) -> Option<Value> {
+        if self.values.is_empty() || self.values.iter().any(Value::has_slots) {
+            return None;
         }
 
-        if self.values.iter().any(Value::has_slots) {
-            return Err(CompileError::UnfilledSlots);
-        }
-
-        Ok(Value::raw(render_command_order(&self.values)))
+        Some(Value::raw(render_command_order(&self.values)))
     }
 
     fn compose_current(&mut self, current: Value) -> Value {
@@ -172,12 +162,19 @@ mod tests {
     }
 
     #[test]
-    fn compile_fails_if_queue_has_unfilled_slots() {
+    fn compile_returns_none_if_queue_has_unfilled_slots() {
         let mut queue = Queue::new();
 
         queue.compose(Value::raw("readlink -f {}"));
 
-        assert_eq!(queue.compile(), Err(CompileError::UnfilledSlots));
+        assert_eq!(queue.compile(), None);
+    }
+
+    #[test]
+    fn compile_returns_none_if_queue_is_empty() {
+        let queue = Queue::new();
+
+        assert_eq!(queue.compile(), None);
     }
 
     #[test]
@@ -265,7 +262,7 @@ mod tests {
         queue.compose(Value::raw("nvim $({})"));
 
         assert_eq!(queue.status(), Some("nvim $(readlink -f {})".into()));
-        assert_eq!(queue.compile(), Err(CompileError::UnfilledSlots));
+        assert_eq!(queue.compile(), None);
 
         queue.compose(Value::escaped("/home/me/link to paper.pdf"));
 
