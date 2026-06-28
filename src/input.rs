@@ -139,12 +139,21 @@ impl InputState {
     }
 
     pub fn press_tab(&mut self) {
-        self.queue.compose(self.current());
+        let current = self.current();
+        if !current.editable_text.is_empty() {
+            self.queue.compose(current);
+        }
         self.reset_input_state();
     }
 
     pub fn press_enter(&mut self) -> Option<Value> {
-        self.queue.compose(self.current());
+        let current = self.current();
+        if current.editable_text.is_empty() {
+            self.reset_input_state();
+            return None;
+        }
+
+        self.queue.compose(current);
         let command = self.queue.compile();
 
         self.reset_input_state();
@@ -193,9 +202,7 @@ impl InputState {
     fn reset_input_state(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
-        self.candidates.clear();
-        self.results.clear();
-        self.selected_index = None;
+        self.rerank();
     }
 }
 
@@ -389,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn character_input_reranks_candidates_by_haystack_and_resets_selection() {
+    fn update_input_reranks_candidates_by_haystack_and_resets_selection() {
         let mut state = InputState::default();
 
         state.feed([
@@ -402,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn character_input_with_no_matches_clears_selection() {
+    fn update_input_with_no_matches_clears_selection() {
         let mut state = InputState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
@@ -426,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn character_input_in_edit_mode_edits_value_and_ignores_results() {
+    fn update_input_in_edit_mode_edits_value_and_ignores_results() {
         let mut state = InputState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
@@ -542,12 +549,12 @@ mod tests {
     }
 
     #[test]
-    fn tab_resets_input_state_but_keeps_queue() {
+    fn tab_resets_input_state_and_restores_original_result_order() {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
             Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
         ]);
         state.update_input(Value::raw(";f"));
 
@@ -555,8 +562,36 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), None);
+        assert_eq!(state.selected(), Some(Value::raw("firefox")));
         assert_eq!(state.queue_status(), Some("'/home/me/paper.pdf'".into()));
+    }
+
+    #[test]
+    fn tab_keeps_candidates_available_after_reset() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
+            Candidate::new(Value::raw("firefox"), 'c'),
+        ]);
+        state.update_input(Value::raw(";f"));
+        state.press_tab();
+
+        state.update_input(Value::raw(";c"));
+
+        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+    }
+
+    #[test]
+    fn tab_with_empty_input_does_not_queue_empty_command() {
+        let mut state = InputState::default();
+
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), None);
+        assert_eq!(state.mode(), InputMode::Search);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.selected(), None);
     }
 
     #[test]
@@ -592,12 +627,12 @@ mod tests {
     }
 
     #[test]
-    fn enter_resets_input_state_when_queue_compiles() {
+    fn enter_resets_input_state_and_restores_original_result_order() {
         let mut state = InputState::default();
 
         state.feed([
-            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
             Candidate::new(Value::raw("evince"), 'c'),
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
         ]);
         state.update_input(Value::raw(";f"));
         state.press_tab();
@@ -610,11 +645,39 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), None);
+        assert_eq!(state.selected(), Some(Value::raw("evince")));
         assert_eq!(
             state.queue_status(),
             Some("evince '/home/me/paper.pdf'".into())
         );
+    }
+
+    #[test]
+    fn enter_keeps_candidates_available_after_reset() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::raw("evince"), 'c'),
+        ]);
+        state.update_input(Value::raw("evince"));
+        assert_eq!(state.press_enter(), Some(Value::raw("evince")));
+
+        state.update_input(Value::raw("fire"));
+
+        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+    }
+
+    #[test]
+    fn enter_with_empty_input_returns_none_and_does_not_queue() {
+        let mut state = InputState::default();
+
+        assert_eq!(state.press_enter(), None);
+
+        assert_eq!(state.queue_status(), None);
+        assert_eq!(state.mode(), InputMode::Search);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.selected(), None);
     }
 
     #[test]
