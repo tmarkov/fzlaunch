@@ -140,19 +140,16 @@ impl InputState {
 
     pub fn press_tab(&mut self) {
         self.queue.compose(self.current());
-        self.reset_search();
+        self.reset_input_state();
     }
 
     pub fn press_enter(&mut self) -> Option<Value> {
         self.queue.compose(self.current());
+        let command = self.queue.compile();
 
-        match self.queue.compile() {
-            Some(command) => Some(command),
-            None => {
-                self.reset_search();
-                None
-            }
-        }
+        self.reset_input_state();
+
+        command
     }
 
     pub fn queue_status(&self) -> Option<String> {
@@ -193,10 +190,12 @@ impl InputState {
             .cloned()
     }
 
-    fn reset_search(&mut self) {
+    fn reset_input_state(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
-        self.rerank();
+        self.candidates.clear();
+        self.results.clear();
+        self.selected_index = None;
     }
 }
 
@@ -543,6 +542,24 @@ mod tests {
     }
 
     #[test]
+    fn tab_resets_input_state_but_keeps_queue() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
+            Candidate::new(Value::raw("firefox"), 'c'),
+        ]);
+        state.update_input(Value::raw(";f"));
+
+        state.press_tab();
+
+        assert_eq!(state.mode(), InputMode::Search);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.selected(), None);
+        assert_eq!(state.queue_status(), Some("'/home/me/paper.pdf'".into()));
+    }
+
+    #[test]
     fn tab_with_command_slots_composes_from_queue() {
         let mut state = InputState::default();
 
@@ -571,6 +588,32 @@ mod tests {
         assert_eq!(
             state.press_enter(),
             Some(Value::raw("evince '/home/me/paper.pdf'"))
+        );
+    }
+
+    #[test]
+    fn enter_resets_input_state_when_queue_compiles() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f'),
+            Candidate::new(Value::raw("evince"), 'c'),
+        ]);
+        state.update_input(Value::raw(";f"));
+        state.press_tab();
+        state.update_input(Value::raw("evince"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw("evince '/home/me/paper.pdf'"))
+        );
+
+        assert_eq!(state.mode(), InputMode::Search);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.selected(), None);
+        assert_eq!(
+            state.queue_status(),
+            Some("evince '/home/me/paper.pdf'".into())
         );
     }
 
