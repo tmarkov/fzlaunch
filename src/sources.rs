@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use crate::input::Candidate;
 use crate::model::Value;
@@ -33,6 +34,45 @@ pub fn executables_from_path(path: &str) -> Vec<Candidate> {
     commands
         .into_iter()
         .map(|command| Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}"))))
+        .collect()
+}
+
+pub fn filesystem_entries(root: &Path) -> Vec<Candidate> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut paths = BTreeSet::new();
+
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+
+        let match_char = if metadata.is_file() {
+            'f'
+        } else if metadata.is_dir() {
+            'd'
+        } else {
+            continue;
+        };
+
+        let Some(path) = entry.path().to_str().map(str::to_owned) else {
+            continue;
+        };
+
+        paths.insert((path, match_char));
+    }
+
+    paths
+        .into_iter()
+        .map(|(path, match_char)| {
+            Candidate::new(
+                Value::escaped(path),
+                match_char,
+                Some(Value::raw("xdg-open {}")),
+            )
+        })
         .collect()
 }
 
