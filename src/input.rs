@@ -105,8 +105,14 @@ impl InputState {
     }
 
     pub fn press_tilde(&mut self) {
+        let value = if self.value.editable_text.is_empty() {
+            Value::raw("")
+        } else {
+            self.selected().unwrap_or_else(|| Value::raw(""))
+        };
+
         self.mode = InputMode::Edit;
-        self.value = Value::raw("");
+        self.value = value;
         self.results.clear();
         self.selected_index = None;
     }
@@ -138,6 +144,23 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw(""));
+    }
+
+    #[test]
+    fn tilde_with_search_input_seeds_edit_mode_from_selected_match() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/Documents/research"), 'd'),
+            Candidate::new(Value::raw("firefox"), 'c'),
+        ]);
+        state.update_input(Value::raw(";d"));
+
+        state.press_tilde();
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::escaped("/home/me/Documents/research"));
+        assert_eq!(state.selected(), None);
     }
 
     #[test]
