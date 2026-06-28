@@ -49,8 +49,8 @@ impl InputState {
         self.rerank();
     }
 
-    pub fn type_char(&mut self, ch: char) {
-        self.value.editable_text.push(ch);
+    pub fn update_input(&mut self, value: Value) {
+        self.value = value;
 
         if self.mode == InputMode::Search {
             self.rerank();
@@ -220,8 +220,7 @@ mod tests {
             Candidate::new(Value::escaped("/home/user/files/firefox"), 'f'),
             Candidate::new(Value::raw("firefox"), 'c'),
         ]);
-        state.type_char(';');
-        state.type_char('c');
+        state.update_input(Value::raw(";c"));
 
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
     }
@@ -231,9 +230,7 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
-        state.type_char('z');
-        state.type_char('z');
-        state.type_char('z');
+        state.update_input(Value::raw("zzz"));
 
         assert_eq!(state.selected(), None);
     }
@@ -247,8 +244,7 @@ mod tests {
             Value::escaped("/home/user/files/paper.pdf"),
             'f',
         )]);
-        state.type_char(';');
-        state.type_char('c');
+        state.update_input(Value::raw(";c"));
 
         assert_eq!(state.selected(), Some(Value::raw("calculator")));
     }
@@ -259,7 +255,7 @@ mod tests {
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
         state.press_tilde();
-        state.type_char('f');
+        state.update_input(Value::raw("f"));
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("f"));
