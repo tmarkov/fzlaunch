@@ -43,7 +43,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::input::Candidate;
+    use crate::input::{Candidate, InputState};
     use crate::model::Value;
 
     fn temp_source_dir(name: &str) -> PathBuf {
@@ -149,5 +149,19 @@ mod tests {
                 Candidate::new(Value::raw("z-command"), 'c', Some(Value::raw("{}"))),
             ]
         );
+    }
+
+    #[test]
+    fn executable_source_candidates_feed_into_input_state() {
+        let bin = temp_source_dir("path-source-input-state");
+        write_file(bin.join("fzlaunch-run-me"), 0o755);
+        let mut state = InputState::default();
+
+        state.feed(super::executables_from_path(
+            bin.to_str().expect("path should be utf-8"),
+        ));
+        state.update_input(Value::raw(";cfzrun"));
+
+        assert_eq!(state.press_enter(), Some(Value::raw("fzlaunch-run-me")));
     }
 }
