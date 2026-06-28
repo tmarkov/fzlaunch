@@ -1,3 +1,41 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+
+use crate::input::Candidate;
+use crate::model::Value;
+
+pub fn executables_from_path(path: &str) -> Vec<Candidate> {
+    let mut commands = BTreeSet::new();
+
+    for dir in std::env::split_paths(path) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+
+            commands.insert(name);
+        }
+    }
+
+    commands
+        .into_iter()
+        .map(|command| Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}"))))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
