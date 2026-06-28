@@ -404,6 +404,43 @@ mod tests {
     }
 
     #[test]
+    fn update_input_in_search_mode_reranks_and_resets_selection() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/user/files/firefox"), 'f'),
+            Candidate::new(Value::raw("firefox"), 'c'),
+        ]);
+        state.select_next();
+        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+
+        state.update_input(Value::raw(";f"));
+
+        assert_eq!(
+            state.selected(),
+            Some(Value::escaped("/home/user/files/firefox"))
+        );
+    }
+
+    #[test]
+    fn update_input_in_edit_mode_does_not_rerank() {
+        let mut state = InputState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("firefox"), 'c'),
+            Candidate::new(Value::escaped("/home/me/firefox.pdf"), 'f'),
+        ]);
+        state.press_tilde();
+
+        state.update_input(Value::raw(";f firefox"));
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw(";f firefox"));
+        assert_eq!(state.current(), Value::raw(";f firefox"));
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
     fn tilde_with_empty_input_ignores_selected_match() {
         let mut state = InputState::default();
 
