@@ -174,14 +174,16 @@ impl InputState {
 
         match self.selected() {
             Some(selected)
-                if !self
-                    .value
-                    .editable_text
-                    .starts_with(&selected.editable_text) =>
+                if selected.editable_text.len() < self.value.editable_text.len()
+                    && self
+                        .value
+                        .editable_text
+                        .starts_with(&selected.editable_text) =>
             {
-                selected
+                self.value.clone()
             }
-            _ => self.value.clone(),
+            Some(selected) => selected,
+            None => self.value.clone(),
         }
     }
 
@@ -247,6 +249,16 @@ mod tests {
         state.update_input(Value::raw("firefox --private-window"));
 
         assert_eq!(state.current(), Value::raw("firefox --private-window"));
+    }
+
+    #[test]
+    fn search_input_equal_to_selected_match_resolves_to_selected_value() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.update_input(Value::raw("/home/me/paper.pdf"));
+
+        assert_eq!(state.current(), Value::escaped("/home/me/paper.pdf"));
     }
 
     #[test]
