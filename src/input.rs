@@ -420,4 +420,88 @@ mod tests {
         assert_eq!(state.value(), Value::raw("{"));
         assert_eq!(state.selected(), None);
     }
+
+    #[test]
+    fn tab_composes_current_value_into_queue() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.update_input(Value::raw(";f"));
+
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), Some("'/home/me/paper.pdf'".into()));
+    }
+
+    #[test]
+    fn tab_with_command_slots_composes_from_queue() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.update_input(Value::raw(";f"));
+        state.press_tab();
+        state.update_input(Value::raw("readlink -f {}"));
+
+        state.press_tab();
+
+        assert_eq!(
+            state.queue_status(),
+            Some("readlink -f '/home/me/paper.pdf'".into())
+        );
+    }
+
+    #[test]
+    fn enter_composes_current_value_and_compiles_queue() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.update_input(Value::raw(";f"));
+        state.press_tab();
+        state.update_input(Value::raw("evince"));
+
+        assert_eq!(
+            state.press_enter(),
+            ActionResult::Execute(Value::raw("evince '/home/me/paper.pdf'"))
+        );
+    }
+
+    #[test]
+    fn enter_with_unfilled_slots_queues_incomplete_value() {
+        let mut state = InputState::default();
+
+        state.update_input(Value::raw("readlink -f {}"));
+
+        assert_eq!(state.press_enter(), ActionResult::Queued);
+        assert_eq!(state.queue_status(), Some("readlink -f {}".into()));
+    }
+
+    #[test]
+    fn enter_with_unfilled_slots_behaves_like_tab() {
+        let mut enter_state = InputState::default();
+        enter_state.update_input(Value::raw("xdg-open {}"));
+
+        let mut tab_state = InputState::default();
+        tab_state.update_input(Value::raw("xdg-open {}"));
+
+        assert_eq!(enter_state.press_enter(), ActionResult::Queued);
+        tab_state.press_tab();
+
+        assert_eq!(enter_state.queue_status(), tab_state.queue_status());
+        assert_eq!(enter_state.mode(), tab_state.mode());
+        assert_eq!(enter_state.value(), tab_state.value());
+        assert_eq!(enter_state.selected(), tab_state.selected());
+    }
+
+    #[test]
+    fn queue_status_is_exposed_by_state() {
+        let mut state = InputState::default();
+
+        assert_eq!(state.queue_status(), None);
+
+        state.feed([Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f')]);
+        state.update_input(Value::raw(";f"));
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), Some("'/home/me/paper.pdf'".into()));
+    }
 }
