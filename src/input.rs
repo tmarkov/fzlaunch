@@ -628,4 +628,58 @@ mod tests {
             Some(Value::raw("xdg-open '/home/me/paper.pdf'"))
         );
     }
+
+    #[test]
+    fn enter_after_initial_tilde_executes_typed_raw_command() {
+        let mut state = InputState::default();
+
+        state.press_tilde();
+        state.update_input(Value::raw("ps aux | grep firefox"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw("ps aux | grep firefox"))
+        );
+    }
+
+    #[test]
+    fn tab_queues_typed_raw_command_extending_selected_prefix() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.update_input(Value::raw("firefox --private-window"));
+
+        state.press_tab();
+
+        assert_eq!(
+            state.queue_status(),
+            Some("firefox --private-window".into())
+        );
+    }
+
+    #[test]
+    fn left_brace_shortcut_preserves_slot_text() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("mv"), 'c')]);
+        state.update_input(Value::raw("mv "));
+        state.update_input(Value::raw("mv {}"));
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw("mv {}"));
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn enter_with_no_matches_executes_typed_raw_input() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.update_input(Value::raw("ps aux | grep firefox"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw("ps aux | grep firefox"))
+        );
+    }
 }
