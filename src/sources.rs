@@ -164,4 +164,76 @@ mod tests {
 
         assert_eq!(state.press_enter(), Some(Value::raw("fzlaunch-run-me")));
     }
+
+    #[test]
+    fn filesystem_source_returns_files_as_escaped_candidates() {
+        let root = temp_source_dir("filesystem-source-file");
+        let file = root.join("paper with spaces.pdf");
+        fs::write(&file, b"pdf").expect("test file should be written");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert_eq!(
+            candidates,
+            vec![Candidate::new(
+                Value::escaped(file.to_str().expect("path should be utf-8")),
+                'f',
+                Some(Value::raw("xdg-open {}"))
+            )]
+        );
+    }
+
+    #[test]
+    fn filesystem_source_returns_directories_as_escaped_candidates() {
+        let root = temp_source_dir("filesystem-source-directory");
+        let dir = root.join("Documents");
+        fs::create_dir(&dir).expect("test directory should be created");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert_eq!(
+            candidates,
+            vec![Candidate::new(
+                Value::escaped(dir.to_str().expect("path should be utf-8")),
+                'd',
+                Some(Value::raw("xdg-open {}"))
+            )]
+        );
+    }
+
+    #[test]
+    fn filesystem_source_returns_files_and_directories_in_sorted_order() {
+        let root = temp_source_dir("filesystem-source-sorted");
+        let file = root.join("z-file.txt");
+        let dir = root.join("a-dir");
+        fs::write(&file, b"text").expect("test file should be written");
+        fs::create_dir(&dir).expect("test directory should be created");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert_eq!(
+            candidates,
+            vec![
+                Candidate::new(
+                    Value::escaped(dir.to_str().expect("path should be utf-8")),
+                    'd',
+                    Some(Value::raw("xdg-open {}"))
+                ),
+                Candidate::new(
+                    Value::escaped(file.to_str().expect("path should be utf-8")),
+                    'f',
+                    Some(Value::raw("xdg-open {}"))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn filesystem_source_ignores_missing_roots() {
+        let root = temp_source_dir("filesystem-source-missing").join("missing");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert_eq!(candidates, Vec::<Candidate>::new());
+    }
 }
