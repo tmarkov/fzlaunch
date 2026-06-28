@@ -736,6 +736,23 @@ mod tests {
     }
 
     #[test]
+    fn enter_with_empty_queue_uses_selected_values_direct_action() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            Some(Value::raw("xdg-open {}")),
+        )]);
+        state.update_input(Value::raw(";f"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw("xdg-open '/home/me/paper.pdf'"))
+        );
+    }
+
+    #[test]
     fn enter_after_initial_tilde_executes_typed_raw_command() {
         let mut state = InputState::default();
 
