@@ -314,4 +314,43 @@ mod tests {
             )))
         );
     }
+
+    #[test]
+    fn filesystem_source_recurses_into_nested_directories() {
+        let root = temp_source_dir("filesystem-source-recursive");
+        let nested = root.join("Documents").join("research");
+        let file = nested.join("paper.pdf");
+        fs::create_dir_all(&nested).expect("nested test directory should be created");
+        fs::write(&file, b"pdf").expect("nested test file should be written");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert!(candidates.contains(&Candidate::new(
+            Value::escaped(nested.to_str().expect("path should be utf-8")),
+            'd',
+            Some(Value::raw("xdg-open {}"))
+        )));
+        assert!(candidates.contains(&Candidate::new(
+            Value::escaped(file.to_str().expect("path should be utf-8")),
+            'f',
+            Some(Value::raw("xdg-open {}"))
+        )));
+    }
+
+    #[test]
+    fn filesystem_source_has_no_depth_cutoff() {
+        let root = temp_source_dir("filesystem-source-deep");
+        let deep = root.join("a").join("b").join("c").join("d");
+        let file = deep.join("deep.txt");
+        fs::create_dir_all(&deep).expect("deep test directory should be created");
+        fs::write(&file, b"text").expect("deep test file should be written");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert!(candidates.contains(&Candidate::new(
+            Value::escaped(file.to_str().expect("path should be utf-8")),
+            'f',
+            Some(Value::raw("xdg-open {}"))
+        )));
+    }
 }
