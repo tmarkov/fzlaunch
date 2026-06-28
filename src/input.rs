@@ -50,6 +50,25 @@ impl InputState {
     }
 
     pub fn update_input(&mut self, value: Value) {
+        if self.mode == InputMode::Search {
+            if let Some(left_brace_index) = value.editable_text.find('{') {
+                let prefix = Value {
+                    editable_text: value.editable_text[..left_brace_index].to_string(),
+                    insertion_policy: value.insertion_policy,
+                };
+                let suffix = value.editable_text[left_brace_index..].to_string();
+
+                self.value = prefix;
+                self.rerank();
+                self.value = self.current();
+                self.mode = InputMode::Edit;
+                self.results.clear();
+                self.selected_index = None;
+                self.value.editable_text.push_str(&suffix);
+                return;
+            }
+        }
+
         self.value = value;
 
         if self.mode == InputMode::Search {
@@ -108,7 +127,7 @@ impl InputState {
         let value = if self.value.editable_text.is_empty() {
             Value::raw("")
         } else {
-            self.selected().unwrap_or_else(|| Value::raw(""))
+            self.current()
         };
 
         self.mode = InputMode::Edit;
