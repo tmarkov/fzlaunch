@@ -62,6 +62,14 @@ mod tests {
             .expect("test executable permissions should be set");
     }
 
+    fn path_string(dirs: &[PathBuf]) -> String {
+        std::env::join_paths(dirs)
+            .expect("test paths should join")
+            .to_str()
+            .expect("test path should be utf-8")
+            .to_string()
+    }
+
     #[test]
     fn path_source_returns_executables_as_raw_command_candidates() {
         let bin = temp_source_dir("path-source-executable");
@@ -87,5 +95,59 @@ mod tests {
         let candidates = super::executables_from_path(bin.to_str().expect("path should be utf-8"));
 
         assert_eq!(candidates, Vec::<Candidate>::new());
+    }
+
+    #[test]
+    fn path_source_deduplicates_commands_from_multiple_path_entries() {
+        let first = temp_source_dir("path-source-first");
+        let second = temp_source_dir("path-source-second");
+        write_file(first.join("shared-command"), 0o755);
+        write_file(second.join("shared-command"), 0o755);
+
+        let candidates = super::executables_from_path(&path_string(&[first, second]));
+
+        assert_eq!(
+            candidates,
+            vec![Candidate::new(
+                Value::raw("shared-command"),
+                'c',
+                Some(Value::raw("{}"))
+            )]
+        );
+    }
+
+    #[test]
+    fn path_source_ignores_missing_path_entries() {
+        let missing = temp_source_dir("path-source-missing").join("missing");
+        let bin = temp_source_dir("path-source-existing");
+        write_file(bin.join("existing-command"), 0o755);
+
+        let candidates = super::executables_from_path(&path_string(&[missing, bin]));
+
+        assert_eq!(
+            candidates,
+            vec![Candidate::new(
+                Value::raw("existing-command"),
+                'c',
+                Some(Value::raw("{}"))
+            )]
+        );
+    }
+
+    #[test]
+    fn path_source_returns_commands_in_sorted_order() {
+        let bin = temp_source_dir("path-source-sorted");
+        write_file(bin.join("z-command"), 0o755);
+        write_file(bin.join("a-command"), 0o755);
+
+        let candidates = super::executables_from_path(bin.to_str().expect("path should be utf-8"));
+
+        assert_eq!(
+            candidates,
+            vec![
+                Candidate::new(Value::raw("a-command"), 'c', Some(Value::raw("{}"))),
+                Candidate::new(Value::raw("z-command"), 'c', Some(Value::raw("{}"))),
+            ]
+        );
     }
 }
