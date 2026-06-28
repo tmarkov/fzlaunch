@@ -38,30 +38,34 @@ pub fn executables_from_path(path: &str) -> Vec<Candidate> {
 }
 
 pub fn filesystem_entries(root: &Path) -> Vec<Candidate> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-
     let mut paths = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
 
-    for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };
 
-        let match_char = if metadata.is_file() {
-            'f'
-        } else if metadata.is_dir() {
-            'd'
-        } else {
-            continue;
-        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
 
-        let Some(path) = entry.path().to_str().map(str::to_owned) else {
-            continue;
-        };
+            let match_char = if metadata.is_file() {
+                'f'
+            } else if metadata.is_dir() {
+                pending.push(entry.path());
+                'd'
+            } else {
+                continue;
+            };
 
-        paths.insert((path, match_char));
+            let Some(path) = entry.path().to_str().map(str::to_owned) else {
+                continue;
+            };
+
+            paths.insert((path, match_char));
+        }
     }
 
     paths
