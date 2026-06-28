@@ -1,9 +1,15 @@
-use crate::model::Value;
+use crate::model::{CompileError, Queue, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Search,
     Edit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionResult {
+    Queued,
+    Execute(Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +19,7 @@ pub struct InputState {
     candidates: Vec<Candidate>,
     results: Vec<Value>,
     selected_index: Option<usize>,
+    queue: Queue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +46,7 @@ impl Default for InputState {
             candidates: Vec::new(),
             results: Vec::new(),
             selected_index: None,
+            queue: Queue::new(),
         }
     }
 }
@@ -136,6 +144,28 @@ impl InputState {
         self.selected_index = None;
     }
 
+    pub fn press_tab(&mut self) {
+        self.queue.compose(self.current());
+        self.reset_search();
+    }
+
+    pub fn press_enter(&mut self) -> ActionResult {
+        self.queue.compose(self.current());
+
+        match self.queue.compile() {
+            Ok(command) => ActionResult::Execute(command),
+            Err(CompileError::UnfilledSlots) => {
+                self.reset_search();
+                ActionResult::Queued
+            }
+            Err(CompileError::Empty) => ActionResult::Queued,
+        }
+    }
+
+    pub fn queue_status(&self) -> Option<String> {
+        self.queue.status()
+    }
+
     pub fn mode(&self) -> InputMode {
         self.mode
     }
@@ -166,6 +196,12 @@ impl InputState {
         self.selected_index
             .and_then(|index| self.results.get(index))
             .cloned()
+    }
+
+    fn reset_search(&mut self) {
+        self.mode = InputMode::Search;
+        self.value = Value::raw("");
+        self.rerank();
     }
 }
 
