@@ -349,13 +349,56 @@ mod tests {
     }
 
     #[test]
-    fn initial_tilde_clears_existing_results() {
+    fn tilde_with_empty_input_ignores_selected_match() {
         let mut state = InputState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
         state.press_tilde();
 
         assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw(""));
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn tilde_with_no_selected_match_keeps_typed_raw_input() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.update_input(Value::raw("ps aux | grep firefox"));
+
+        state.press_tilde();
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw("ps aux | grep firefox"));
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn left_brace_in_search_mode_enters_edit_mode_from_current_value() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("mv"), 'c')]);
+        state.update_input(Value::raw("mv "));
+
+        state.update_input(Value::raw("mv {"));
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw("mv {"));
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn left_brace_in_edit_mode_updates_input_without_search_resolution() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("mv"), 'c')]);
+        state.press_tilde();
+
+        state.update_input(Value::raw("{"));
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw("{"));
         assert_eq!(state.selected(), None);
     }
 }
