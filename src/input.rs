@@ -125,6 +125,24 @@ impl InputState {
         self.value.clone()
     }
 
+    pub fn current(&self) -> Value {
+        if self.mode == InputMode::Edit {
+            return self.value.clone();
+        }
+
+        match self.selected() {
+            Some(selected)
+                if !self
+                    .value
+                    .editable_text
+                    .starts_with(&selected.editable_text) =>
+            {
+                selected
+            }
+            _ => self.value.clone(),
+        }
+    }
+
     pub fn selected(&self) -> Option<Value> {
         self.selected_index
             .and_then(|index| self.results.get(index))
@@ -161,6 +179,51 @@ mod tests {
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::escaped("/home/me/Documents/research"));
         assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn search_input_without_prefix_resolves_to_selected_match() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.update_input(Value::raw("fir"));
+
+        assert_eq!(state.current(), Value::raw("firefox"));
+    }
+
+    #[test]
+    fn search_input_extending_selected_match_resolves_to_raw_input() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.update_input(Value::raw("firefox --private-window"));
+
+        assert_eq!(state.current(), Value::raw("firefox --private-window"));
+    }
+
+    #[test]
+    fn search_input_with_no_matches_resolves_to_raw_input() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c')]);
+        state.update_input(Value::raw("ps aux | grep firefox"));
+
+        assert_eq!(state.current(), Value::raw("ps aux | grep firefox"));
+    }
+
+    #[test]
+    fn edit_mode_current_value_is_input_value() {
+        let mut state = InputState::default();
+
+        state.feed([Candidate::new(Value::escaped("/home/me/Documents"), 'd')]);
+        state.update_input(Value::raw(";d"));
+        state.press_tilde();
+        state.update_input(Value::escaped("/home/me/Documents/paper.pdf"));
+
+        assert_eq!(
+            state.current(),
+            Value::escaped("/home/me/Documents/paper.pdf")
+        );
     }
 
     #[test]
