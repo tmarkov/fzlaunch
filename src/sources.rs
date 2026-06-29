@@ -6,78 +6,109 @@ use std::path::Path;
 use crate::input::Candidate;
 use crate::model::Value;
 
-pub fn executables_from_path(path: &str) -> Vec<Candidate> {
-    let mut commands = BTreeSet::new();
+pub trait Source {
+    fn candidates(&self) -> Vec<Candidate>;
+}
 
-    for dir in std::env::split_paths(path) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
+pub struct PathExecutables<'a> {
+    pub path: &'a str,
+}
 
-        for entry in entries.flatten() {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
+pub struct FilesystemRoot<'a> {
+    pub root: &'a Path,
+}
 
-            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-
-            commands.insert(name);
-        }
-    }
-
-    commands
-        .into_iter()
-        .map(|command| Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}"))))
+pub fn collect_candidates(sources: &[&dyn Source]) -> Vec<Candidate> {
+    sources
+        .iter()
+        .flat_map(|source| source.candidates())
         .collect()
 }
 
+pub fn executables_from_path(path: &str) -> Vec<Candidate> {
+    PathExecutables { path }.candidates()
+}
+
 pub fn filesystem_entries(root: &Path) -> Vec<Candidate> {
-    let mut paths = BTreeSet::new();
-    let mut pending = vec![root.to_path_buf()];
+    FilesystemRoot { root }.candidates()
+}
 
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
+impl Source for PathExecutables<'_> {
+    fn candidates(&self) -> Vec<Candidate> {
+        let mut commands = BTreeSet::new();
 
-        for entry in entries.flatten() {
-            let Ok(metadata) = entry.metadata() else {
+        for dir in std::env::split_paths(self.path) {
+            let Ok(entries) = fs::read_dir(dir) else {
                 continue;
             };
 
-            let match_char = if metadata.is_file() {
-                'f'
-            } else if metadata.is_dir() {
-                pending.push(entry.path());
-                'd'
-            } else {
-                continue;
-            };
+            for entry in entries.flatten() {
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
 
-            let Some(path) = entry.path().to_str().map(str::to_owned) else {
-                continue;
-            };
+                if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
 
-            paths.insert((path, match_char));
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+
+                commands.insert(name);
+            }
         }
-    }
 
-    paths
-        .into_iter()
-        .map(|(path, match_char)| {
-            Candidate::new(
-                Value::escaped(path),
-                match_char,
-                Some(Value::raw("xdg-open {}")),
-            )
-        })
-        .collect()
+        commands
+            .into_iter()
+            .map(|command| Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}"))))
+            .collect()
+    }
+}
+
+impl Source for FilesystemRoot<'_> {
+    fn candidates(&self) -> Vec<Candidate> {
+        let mut paths = BTreeSet::new();
+        let mut pending = vec![self.root.to_path_buf()];
+
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(dir) else {
+                continue;
+            };
+
+            for entry in entries.flatten() {
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+
+                let match_char = if metadata.is_file() {
+                    'f'
+                } else if metadata.is_dir() {
+                    pending.push(entry.path());
+                    'd'
+                } else {
+                    continue;
+                };
+
+                let Some(path) = entry.path().to_str().map(str::to_owned) else {
+                    continue;
+                };
+
+                paths.insert((path, match_char));
+            }
+        }
+
+        paths
+            .into_iter()
+            .map(|(path, match_char)| {
+                Candidate::new(
+                    Value::escaped(path),
+                    match_char,
+                    Some(Value::raw("xdg-open {}")),
+                )
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +143,48 @@ mod tests {
             .to_str()
             .expect("test path should be utf-8")
             .to_string()
+    }
+
+    struct StaticSource {
+        candidates: Vec<Candidate>,
+    }
+
+    impl super::Source for StaticSource {
+        fn candidates(&self) -> Vec<Candidate> {
+            self.candidates.clone()
+        }
+    }
+
+    #[test]
+    fn collect_candidates_combines_multiple_sources() {
+        let commands = StaticSource {
+            candidates: vec![Candidate::new(
+                Value::raw("firefox"),
+                'c',
+                Some(Value::raw("{}")),
+            )],
+        };
+        let files = StaticSource {
+            candidates: vec![Candidate::new(
+                Value::escaped("/home/me/paper.pdf"),
+                'f',
+                Some(Value::raw("xdg-open {}")),
+            )],
+        };
+
+        let candidates = super::collect_candidates(&[&commands, &files]);
+
+        assert_eq!(
+            candidates,
+            vec![
+                Candidate::new(Value::raw("firefox"), 'c', Some(Value::raw("{}"))),
+                Candidate::new(
+                    Value::escaped("/home/me/paper.pdf"),
+                    'f',
+                    Some(Value::raw("xdg-open {}"))
+                ),
+            ]
+        );
     }
 
     #[test]
