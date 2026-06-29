@@ -1,4 +1,6 @@
 use crate::model::{Queue, Value};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -21,6 +23,17 @@ pub struct Candidate {
     value: Value,
     match_char: char,
     direct_action: Option<Value>,
+}
+
+struct IndexedHaystack {
+    index: usize,
+    haystack: String,
+}
+
+impl AsRef<str> for IndexedHaystack {
+    fn as_ref(&self) -> &str {
+        &self.haystack
+    }
 }
 
 impl Candidate {
@@ -93,13 +106,20 @@ impl InputState {
                 .map(Candidate::haystack)
                 .collect::<Vec<_>>();
 
-            self.results = frizbee::match_list(
+            let indexed_haystacks = haystacks
+                .into_iter()
+                .enumerate()
+                .map(|(index, haystack)| IndexedHaystack { index, haystack });
+            let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+
+            self.results = Pattern::parse(
                 &self.value.editable_text,
-                &haystacks,
-                &frizbee::Config::default(),
+                CaseMatching::Ignore,
+                Normalization::Smart,
             )
+            .match_list(indexed_haystacks, &mut matcher)
             .into_iter()
-            .map(|matched| self.candidates[matched.index as usize].clone())
+            .map(|(matched, _)| self.candidates[matched.index].clone())
             .collect();
         }
 

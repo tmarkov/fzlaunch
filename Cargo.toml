@@ -5,4 +5,4 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
-frizbee = "0.9.0"
+nucleo-matcher = "0.3.1"

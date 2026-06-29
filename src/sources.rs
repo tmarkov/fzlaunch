@@ -362,7 +362,7 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed(super::filesystem_entries(&root));
-        state.update_input(Value::raw(";f"));
+        state.update_input(Value::raw(";fpaper"));
 
         assert_eq!(
             state.press_enter(),
@@ -381,7 +381,7 @@ mod tests {
         let mut state = InputState::default();
 
         state.feed(super::filesystem_entries(&root));
-        state.update_input(Value::raw(";d"));
+        state.update_input(Value::raw(";ddoc"));
 
         assert_eq!(
             state.press_enter(),
