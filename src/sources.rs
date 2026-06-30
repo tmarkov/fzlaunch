@@ -4,9 +4,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::model::{Candidate, Value};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+pub type CandidateSender = mpsc::Sender<Vec<Candidate>>;
+pub type CandidateReceiver = mpsc::Receiver<Vec<Candidate>>;
 
 pub trait Source {
     fn candidates(&self) -> Vec<Candidate>;
+}
+
+pub trait AsyncSource: Send + 'static {
+    fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()>;
 }
 
 pub struct PathExecutables<'a> {
