@@ -12,6 +12,13 @@ pub struct Value {
     pub insertion_policy: InsertionPolicy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    value: Value,
+    selector: char,
+    direct_action: Option<Value>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Queue {
     values: VecDeque<Value>,
@@ -125,6 +132,28 @@ impl Value {
             editable_text: text,
             insertion_policy: InsertionPolicy::Raw,
         }
+    }
+}
+
+impl Candidate {
+    pub fn new(value: Value, selector: char, direct_action: Option<Value>) -> Self {
+        Self {
+            value,
+            selector,
+            direct_action,
+        }
+    }
+
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub(crate) fn direct_action(&self) -> Option<&Value> {
+        self.direct_action.as_ref()
+    }
+
+    pub(crate) fn selector(&self) -> char {
+        self.selector
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::model::{Queue, Value};
+use crate::model::{Candidate, Queue, Value};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
@@ -9,20 +9,13 @@ pub enum InputMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputState {
+pub struct LauncherState {
     mode: InputMode,
     value: Value,
     candidates: Vec<Candidate>,
     results: Vec<Candidate>,
     selected_index: Option<usize>,
     queue: Queue,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
-    value: Value,
-    match_char: char,
-    direct_action: Option<Value>,
 }
 
 struct IndexedHaystack {
@@ -36,21 +29,7 @@ impl AsRef<str> for IndexedHaystack {
     }
 }
 
-impl Candidate {
-    pub fn new(value: Value, match_char: char, direct_action: Option<Value>) -> Self {
-        Self {
-            value,
-            match_char,
-            direct_action,
-        }
-    }
-
-    fn haystack(&self) -> String {
-        format!(";{} {}", self.match_char, self.value.editable_text)
-    }
-}
-
-impl Default for InputState {
+impl Default for LauncherState {
     fn default() -> Self {
         Self {
             mode: InputMode::Search,
@@ -63,7 +42,7 @@ impl Default for InputState {
     }
 }
 
-impl InputState {
+impl LauncherState {
     pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
         self.candidates.extend(candidates);
         self.rerank();
@@ -103,7 +82,7 @@ impl InputState {
             let haystacks = self
                 .candidates
                 .iter()
-                .map(Candidate::haystack)
+                .map(candidate_haystack)
                 .collect::<Vec<_>>();
 
             let indexed_haystacks = haystacks
@@ -164,13 +143,13 @@ impl InputState {
         if !current.editable_text.is_empty() {
             self.queue.compose(current);
         }
-        self.reset_input_state();
+        self.reset_input();
     }
 
     pub fn press_enter(&mut self) -> Option<Value> {
         let current = self.current();
         if current.editable_text.is_empty() {
-            self.reset_input_state();
+            self.reset_input();
             return None;
         }
 
@@ -178,7 +157,7 @@ impl InputState {
             if let Some(direct_action) = self
                 .selected_index
                 .and_then(|index| self.results.get(index))
-                .and_then(|candidate| candidate.direct_action.clone())
+                .and_then(|candidate| candidate.direct_action().cloned())
             {
                 self.queue.compose(direct_action);
             }
@@ -187,7 +166,7 @@ impl InputState {
         self.queue.compose(current);
         let command = self.queue.compile();
 
-        self.reset_input_state();
+        self.reset_input();
 
         command
     }
@@ -227,14 +206,22 @@ impl InputState {
     pub fn selected(&self) -> Option<Value> {
         self.selected_index
             .and_then(|index| self.results.get(index))
-            .map(|candidate| candidate.value.clone())
+            .map(|candidate| candidate.value().clone())
     }
 
-    fn reset_input_state(&mut self) {
+    fn reset_input(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
         self.rerank();
     }
+}
+
+fn candidate_haystack(candidate: &Candidate) -> String {
+    format!(
+        ";{} {}",
+        candidate.selector(),
+        candidate.value().editable_text
+    )
 }
 
 #[cfg(test)]
@@ -243,7 +230,7 @@ mod tests {
 
     #[test]
     fn initial_tilde_enters_edit_mode_with_empty_raw_buffer() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.press_tilde();
 
@@ -253,7 +240,7 @@ mod tests {
 
     #[test]
     fn tilde_with_search_input_seeds_edit_mode_from_selected_match() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::escaped("/home/me/Documents/research"), 'd', None),
@@ -270,7 +257,7 @@ mod tests {
 
     #[test]
     fn search_input_without_prefix_resolves_to_selected_match() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("fir"));
@@ -280,7 +267,7 @@ mod tests {
 
     #[test]
     fn search_input_extending_selected_match_resolves_to_raw_input() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("firefox --private-window"));
@@ -290,7 +277,7 @@ mod tests {
 
     #[test]
     fn search_input_equal_to_selected_match_resolves_to_selected_value() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/paper.pdf"),
@@ -304,7 +291,7 @@ mod tests {
 
     #[test]
     fn search_input_with_no_matches_resolves_to_raw_input() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));
@@ -314,7 +301,7 @@ mod tests {
 
     #[test]
     fn edit_mode_current_value_is_input_value() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/Documents"),
@@ -333,7 +320,7 @@ mod tests {
 
     #[test]
     fn feed_adds_candidate_matches_and_selects_first_by_default() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("firefox"), 'c', None),
@@ -345,7 +332,7 @@ mod tests {
 
     #[test]
     fn feeding_new_candidates_resets_selection_to_first_match() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("first"), 'c', None),
@@ -364,7 +351,7 @@ mod tests {
 
     #[test]
     fn selection_can_move_back_to_previous_match() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("first"), 'c', None),
@@ -378,7 +365,7 @@ mod tests {
 
     #[test]
     fn selection_stays_at_last_match_when_moving_down_past_end() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("first"), 'c', None),
@@ -392,7 +379,7 @@ mod tests {
 
     #[test]
     fn selection_stays_at_first_match_when_moving_up_past_start() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("first"), 'c', None),
@@ -405,7 +392,7 @@ mod tests {
 
     #[test]
     fn select_next_with_no_results_is_noop() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.select_next();
 
@@ -416,7 +403,7 @@ mod tests {
 
     #[test]
     fn select_previous_with_no_results_is_noop() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.select_previous();
 
@@ -427,7 +414,7 @@ mod tests {
 
     #[test]
     fn feed_empty_candidates_keeps_selection_empty_without_existing_candidates() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([]);
 
@@ -436,7 +423,7 @@ mod tests {
 
     #[test]
     fn update_input_reranks_candidates_by_haystack_and_resets_selection() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::escaped("/home/user/files/firefox"), 'f', None),
@@ -449,7 +436,7 @@ mod tests {
 
     #[test]
     fn update_input_with_no_matches_clears_selection() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("zzz"));
@@ -459,7 +446,7 @@ mod tests {
 
     #[test]
     fn feed_appends_candidate_matches_from_multiple_sources() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("calculator"), 'c', None)]);
         state.feed([Candidate::new(
@@ -474,7 +461,7 @@ mod tests {
 
     #[test]
     fn update_input_in_edit_mode_edits_value_and_ignores_results() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.press_tilde();
@@ -487,7 +474,7 @@ mod tests {
 
     #[test]
     fn update_input_in_search_mode_reranks_and_resets_selection() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::escaped("/home/user/files/firefox"), 'f', None),
@@ -506,7 +493,7 @@ mod tests {
 
     #[test]
     fn update_input_in_edit_mode_does_not_rerank() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("firefox"), 'c', None),
@@ -524,7 +511,7 @@ mod tests {
 
     #[test]
     fn tilde_with_empty_input_ignores_selected_match() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.press_tilde();
@@ -536,7 +523,7 @@ mod tests {
 
     #[test]
     fn tilde_with_no_selected_match_keeps_typed_raw_input() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));
@@ -550,7 +537,7 @@ mod tests {
 
     #[test]
     fn left_brace_in_search_mode_enters_edit_mode_from_current_value() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.update_input(Value::raw("mv "));
@@ -564,7 +551,7 @@ mod tests {
 
     #[test]
     fn left_brace_in_edit_mode_updates_input_without_search_resolution() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.press_tilde();
@@ -578,7 +565,7 @@ mod tests {
 
     #[test]
     fn tab_composes_current_value_into_queue() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/paper.pdf"),
@@ -593,8 +580,8 @@ mod tests {
     }
 
     #[test]
-    fn tab_resets_input_state_and_restores_original_result_order() {
-        let mut state = InputState::default();
+    fn tab_resets_launcher_state_and_restores_original_result_order() {
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("firefox"), 'c', None),
@@ -612,7 +599,7 @@ mod tests {
 
     #[test]
     fn tab_keeps_candidates_available_after_reset() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
@@ -628,7 +615,7 @@ mod tests {
 
     #[test]
     fn tab_with_empty_input_does_not_queue_empty_command() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.press_tab();
 
@@ -640,7 +627,7 @@ mod tests {
 
     #[test]
     fn tab_with_command_slots_composes_from_queue() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/paper.pdf"),
@@ -661,7 +648,7 @@ mod tests {
 
     #[test]
     fn enter_composes_current_value_and_compiles_queue() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/paper.pdf"),
@@ -679,8 +666,8 @@ mod tests {
     }
 
     #[test]
-    fn enter_resets_input_state_and_restores_original_result_order() {
-        let mut state = InputState::default();
+    fn enter_resets_launcher_state_and_restores_original_result_order() {
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("evince"), 'c', None),
@@ -706,7 +693,7 @@ mod tests {
 
     #[test]
     fn enter_keeps_candidates_available_after_reset() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::raw("firefox"), 'c', None),
@@ -722,7 +709,7 @@ mod tests {
 
     #[test]
     fn enter_with_empty_input_returns_none_and_does_not_queue() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         assert_eq!(state.press_enter(), None);
 
@@ -734,7 +721,7 @@ mod tests {
 
     #[test]
     fn enter_with_unfilled_slots_queues_incomplete_value() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.update_input(Value::raw("readlink -f {}"));
 
@@ -744,10 +731,10 @@ mod tests {
 
     #[test]
     fn enter_with_unfilled_slots_behaves_like_tab() {
-        let mut enter_state = InputState::default();
+        let mut enter_state = LauncherState::default();
         enter_state.update_input(Value::raw("xdg-open {}"));
 
-        let mut tab_state = InputState::default();
+        let mut tab_state = LauncherState::default();
         tab_state.update_input(Value::raw("xdg-open {}"));
 
         assert_eq!(enter_state.press_enter(), None);
@@ -761,7 +748,7 @@ mod tests {
 
     #[test]
     fn queue_status_is_exposed_by_state() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         assert_eq!(state.queue_status(), None);
 
@@ -778,7 +765,7 @@ mod tests {
 
     #[test]
     fn enter_returns_execute_when_queue_compiles() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/paper.pdf"),
@@ -797,7 +784,7 @@ mod tests {
 
     #[test]
     fn enter_with_empty_queue_uses_selected_values_direct_action() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(
             Value::escaped("/home/me/paper.pdf"),
@@ -814,7 +801,7 @@ mod tests {
 
     #[test]
     fn enter_after_initial_tilde_executes_typed_raw_command() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.press_tilde();
         state.update_input(Value::raw("ps aux | grep firefox"));
@@ -827,7 +814,7 @@ mod tests {
 
     #[test]
     fn tab_queues_typed_raw_command_extending_selected_prefix() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("firefox --private-window"));
@@ -842,7 +829,7 @@ mod tests {
 
     #[test]
     fn left_brace_shortcut_preserves_slot_text() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.update_input(Value::raw("mv "));
@@ -855,7 +842,7 @@ mod tests {
 
     #[test]
     fn enter_with_no_matches_executes_typed_raw_input() {
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));

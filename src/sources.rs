@@ -3,8 +3,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use crate::input::Candidate;
-use crate::model::Value;
+use crate::model::{Candidate, Value};
 
 pub trait Source {
     fn candidates(&self) -> Vec<Candidate>;
@@ -118,8 +117,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::input::{Candidate, InputState};
-    use crate::model::Value;
+    use crate::model::{Candidate, Value};
+    use crate::state::LauncherState;
 
     fn temp_source_dir(name: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -269,10 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn executable_source_candidates_feed_into_input_state() {
-        let bin = temp_source_dir("path-source-input-state");
+    fn executable_source_candidates_feed_into_launcher_state() {
+        let bin = temp_source_dir("path-source-launcher-state");
         write_file(bin.join("fzlaunch-run-me"), 0o755);
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed(super::executables_from_path(
             bin.to_str().expect("path should be utf-8"),
@@ -295,7 +294,7 @@ mod tests {
 
         let commands = super::PathExecutables { path: &path };
         let files = super::FilesystemRoot { root: &root };
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed(super::collect_candidates(&[&commands, &files]));
 
@@ -393,11 +392,11 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_file_candidates_feed_into_input_state() {
-        let root = temp_source_dir("filesystem-source-file-input-state");
+    fn filesystem_file_candidates_feed_into_launcher_state() {
+        let root = temp_source_dir("filesystem-source-file-launcher-state");
         let file = root.join("paper.pdf");
         fs::write(&file, b"pdf").expect("test file should be written");
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed(super::filesystem_entries(&root));
         state.update_input(Value::raw(";fpaper"));
@@ -412,11 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_directory_candidates_feed_into_input_state() {
-        let root = temp_source_dir("filesystem-source-directory-input-state");
+    fn filesystem_directory_candidates_feed_into_launcher_state() {
+        let root = temp_source_dir("filesystem-source-directory-launcher-state");
         let dir = root.join("Documents");
         fs::create_dir(&dir).expect("test directory should be created");
-        let mut state = InputState::default();
+        let mut state = LauncherState::default();
 
         state.feed(super::filesystem_entries(&root));
         state.update_input(Value::raw(";ddoc"));

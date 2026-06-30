@@ -12,9 +12,8 @@ The core interaction is:
 4. Compose it with another value.
 5. Execute the resulting shell command.
 
-The launcher is intentionally shell-oriented. Its observable behavior is that it
-constructs a command with shell-equivalent semantics and executes it. The exact
-process API used by an implementation is not part of this spec.
+The launcher is intentionally shell-oriented. It constructs and runs commands
+with shell-equivalent observable behavior.
 
 # UI
 
@@ -30,40 +29,27 @@ When started, `fzlaunch` opens a TUI with:
 
 # Values
 
-Everything that can be selected, queued, inserted, or executed is a value.
+Everything that can be selected, queued, inserted, or executed behaves as a
+value.
 
-A value has:
-
-1. Editable text: what appears in the search box after `[tilde]`.
-2. Insertion policy: how the value is inserted into shell text.
-3. Optional direct action: how the value is executed when it is the whole action.
-
-There are two insertion policies:
-
-1. `Raw`: insert the value verbatim.
-2. `Escaped`: insert the value using POSIX shell quoting.
+When a value is edited with `[tilde]`, the search box shows editable text. When a
+value is inserted into a command, it is inserted either verbatim or with POSIX
+shell quoting.
 
 Examples:
 
-| Value | Source | Editable text | Insertion policy | Inserted shell text |
-| --- | --- | --- | --- | --- |
-| Firefox command | executables | `firefox` | `Raw` | `firefox` |
-| File | files | `/home/me/a b.pdf` | `Escaped` | `'/home/me/a b.pdf'` |
-| Directory | directories | `/home/me/Documents` | `Escaped` | `'/home/me/Documents'` |
-| Composed command | composition | `readlink -f '/tmp/a b'` | `Raw` | `readlink -f '/tmp/a b'` |
-| Typed shell command | user text | `ps aux \| grep firefox` | `Raw` | `ps aux \| grep firefox` |
+| Value | Search result | Editable text | Inserted shell text |
+| --- | --- | --- | --- |
+| Firefox command | executables | `firefox` | `firefox` |
+| File | files | `/home/me/a b.pdf` | `'/home/me/a b.pdf'` |
+| Directory | directories | `/home/me/Documents` | `'/home/me/Documents'` |
+| Composed command | composition | `readlink -f '/tmp/a b'` | `readlink -f '/tmp/a b'` |
+| Typed shell command | user text | `ps aux \| grep firefox` | `ps aux \| grep firefox` |
 
-Sources choose the insertion policy for each value they produce. The built-in
-file and directory sources produce `Escaped` values. The built-in executable
-source normally produces `Raw` values for command names found on `$PATH`.
+# Direct Execution
 
-If an executable source returns a filesystem path that must be quoted, it should
-produce an `Escaped` value instead. The source owns that choice.
-
-# Direct actions
-
-Some values are useful to execute directly even though their insertion text is
-not itself a useful command.
+Some selected values do something useful when executed directly even though
+their inserted shell text is not itself a useful command.
 
 For example, a file should be inserted as:
 
@@ -74,20 +60,18 @@ For example, a file should be inserted as:
 when it is used as an argument, but pressing `[ent]` on that file should open it,
 not try to execute the file path as a program.
 
-To support that, a source may provide a direct action for a value. A direct
-action is only used when the value is executed as the whole action, with no queue
-and no surrounding command text.
+Direct execution behavior:
 
-Built-in direct actions:
-
-1. Files: open with the configured file opener, e.g. shell-equivalent
+1. Files open with the configured file opener, e.g. shell-equivalent
    `xdg-open {}`.
-2. Directories: open with the configured directory opener, e.g. shell-equivalent
+2. Directories open with the configured directory opener, e.g. shell-equivalent
    `xdg-open {}`.
 3. Executables: execute the value itself.
 
-Direct actions do not affect slot insertion or argument insertion. A file queued
-before `evince` is still inserted as a quoted path, not as `xdg-open 'path'`.
+Direct execution behavior is only used when the selected value is the whole
+action, with no queued values and no surrounding command text. It does not affect
+slot insertion or argument insertion. A file queued before `evince` is still
+inserted as a quoted path, not as `xdg-open 'path'`.
 
 # Modes
 
@@ -104,9 +88,9 @@ selection to the top match.
 
 In search mode, `[tab]` and `[ent]` first resolve the current value:
 
-1. If there are no matches, the current value is the search-box text as `Raw`.
+1. If there are no matches, the current value is the search-box text as typed.
 2. If the selected result's editable text is a proper prefix of the search-box
-   text, the current value is the search-box text as `Raw`.
+   text, the current value is the search-box text as typed.
 3. Otherwise, the current value is the selected result.
 
 Examples:
@@ -147,7 +131,7 @@ force direct shell entry, use initial `[tilde]`:
 Normally, `[tilde]`:
 
 1. Copies the selected value's editable text into the search box.
-2. Preserves that value's insertion policy.
+2. Preserves how that value is inserted into shell text.
 3. Clears/ignores the result list.
 
 Subsequent typing edits that value directly. It does not produce new matches.
@@ -164,16 +148,15 @@ If `;ddocres` selects `/home/me/Documents/research`, the search box becomes:
 /home/me/Documents/research/2024-polynomial-interpolation.pdf
 ```
 
-The buffer still has the directory value's `Escaped` insertion policy, so when it
-is inserted into shell text, it becomes:
+The edited directory is still inserted as a quoted path:
 
 ```sh
 '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
 ```
 
 The one explicit exception is initial `[tilde]`: if the search box is empty when
-`[tilde]` is pressed, it enters edit mode with an empty `Raw` buffer and does not
-copy the selected result.
+`[tilde]` is pressed, it enters edit mode with an empty buffer and does not copy
+the selected result.
 
 Example:
 
@@ -181,7 +164,7 @@ Example:
 [tilde]ps aux | grep firefox[ent]
 ```
 
-executes the typed raw shell command.
+executes the typed shell command.
 
 # Slots
 
@@ -218,13 +201,10 @@ produces:
 
 contains no slots.
 
-When a value is inserted into a slot:
+When a value is inserted into a slot, it uses the same shell text it would use as
+an argument. Command text is inserted verbatim. Paths are inserted quoted.
 
-1. `Raw` values are inserted verbatim.
-2. `Escaped` values are inserted using POSIX shell quoting.
-
-Slot filling always produces a new `Raw` value. Any remaining slots stay in the
-new value.
+Any remaining slots stay in the command text.
 
 Typing `{` in search mode first resolves the current value, enters edit mode with
 that value, then inserts `{`. This makes common command composition short:
@@ -234,7 +214,7 @@ mv {} {}
 ```
 
 The first `{` resolves `mv ` as the current value, enters edit mode with that
-raw buffer, and then appends `{`.
+typed buffer, and then appends `{`.
 
 # Queue and composition
 
@@ -259,9 +239,9 @@ The composition rule is:
 This rule means that when both the queued value and the new value have slots, the
 queued value is inserted into the new value.
 
-Argument insertion uses the same insertion policy as slot insertion. `Raw`
-arguments are appended verbatim. `Escaped` arguments are shell-quoted. Direct
-actions are not used for queued arguments.
+Argument insertion uses the same shell text as slot insertion. Command text is
+appended verbatim. Paths are appended quoted. Direct execution behavior is not
+used for queued arguments.
 
 Slot filling consumes queued values. If the current value runs out of slots
 before the queue is empty, the remaining queued values stay queued. On `[ent]`,
@@ -298,7 +278,7 @@ Example with more queued values than slots:
 a[tab]b[tab]cmd {}[ent]
 ```
 
-If `a` and `b` are raw values, final command:
+If `a` and `b` select command text, final command:
 
 ```sh
 cmd a b
@@ -330,7 +310,7 @@ If the best match is:
 /home/me/Documents/research/2024-polynomial-interpolation.pdf
 ```
 
-then the file source's direct action opens that file, for example with:
+then pressing `[ent]` opens that file, for example with:
 
 ```sh
 xdg-open '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
@@ -345,7 +325,7 @@ docrespoly[tab]evin[ent]
 Step by step:
 
 1. `docrespoly` selects the PDF.
-2. `[tab]` queues the PDF as an `Escaped` value.
+2. `[tab]` queues the PDF so it will be inserted as a quoted path.
 3. `evin` selects `evince`.
 4. `[ent]` executes the current value with the queue as arguments.
 
@@ -355,7 +335,7 @@ Final command:
 evince '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
 ```
 
-## Display raw paths but preview escaped shell text
+## Display paths but preview escaped shell text
 
 Suppose a selected file has this editable text:
 
@@ -363,8 +343,8 @@ Suppose a selected file has this editable text:
 /home/me/a'b.txt
 ```
 
-After `[tilde]`, the search box shows that raw editable path. It does not show
-the shell-escaped form.
+After `[tilde]`, the search box shows the editable path. It does not show the
+shell-escaped form.
 
 When the value is queued or previewed as final shell text, it is shown escaped:
 
@@ -379,7 +359,7 @@ firefox --private-window[ent]
 ```
 
 The selected value `firefox` is a proper prefix of the typed buffer, so the typed
-buffer wins and executes as `Raw` shell text:
+buffer wins and executes as typed:
 
 ```sh
 firefox --private-window
@@ -391,19 +371,19 @@ The same resolution is used for `[tab]`:
 firefox --private-window[tab]
 ```
 
-queues the `Raw` value:
+queues the command as typed:
 
 ```sh
 firefox --private-window
 ```
 
-## Type a raw shell command directly
+## Type a shell command directly
 
 ```text
 [tilde]ps aux | grep firefox[ent]
 ```
 
-Initial `[tilde]` enters edit mode with an empty `Raw` buffer. The command
+Initial `[tilde]` enters edit mode with an empty buffer. The command
 executes as typed:
 
 ```sh
@@ -426,17 +406,17 @@ Then:
 
 Step by step:
 
-1. `2024pdf[tab]` queues the downloaded PDF as an `Escaped` value.
+1. `2024pdf[tab]` queues the downloaded PDF so it will be inserted as a quoted
+   path.
 2. `secm[tilde]` seeds the buffer with `securemove`.
-3. ` {} {}` edits it into a `Raw` value with two slots.
+3. ` {} {}` edits it into a command with two slots.
 4. `[tab]` fills the first slot from the queue and queues:
 
 ```sh
 securemove '/home/me/Downloads/2024-8234.pdf' {}
 ```
 
-5. `;ddocres[tilde]` enters edit mode with the selected directory as an
-   `Escaped` value.
+5. `;ddocres[tilde]` enters edit mode with the selected directory.
 6. `/2024-polynomial-interpolation.pdf` edits that value.
 7. `[ent]` fills the remaining slot and executes:
 
@@ -460,8 +440,8 @@ Then:
 
 Step by step:
 
-1. The file is queued as an `Escaped` value.
-2. `readlink -f {` resolves the typed buffer `readlink -f ` as `Raw`, enters
+1. The file is queued so it will be inserted as a quoted path.
+2. `readlink -f {` resolves the typed buffer `readlink -f `, enters
    edit mode, and then appends `{`.
 3. `[tab]` fills the slot with the queued file and queues:
 
@@ -469,8 +449,8 @@ Step by step:
 readlink -f '/home/me/link to paper.pdf'
 ```
 
-4. `nvim $({})[ent]` inserts that queued `Raw` shell fragment into the new
-   command and executes:
+4. `nvim $({})[ent]` inserts that queued shell fragment into the new command and
+   executes:
 
 ```sh
 nvim $(readlink -f '/home/me/link to paper.pdf')
@@ -506,32 +486,25 @@ nvim $(readlink -f '/home/me/link to paper.pdf')
 foo[tab]echo {{}}[ent]
 ```
 
-If `foo` selects a `Raw` value `bar`, final command:
+If `foo` selects `bar`, final command:
 
 ```sh
 echo {bar}
 ```
 
-# Sources
+# Searchable Values
 
-Built-in sources:
+The built-in searchable values are:
 
 1. Files
 2. Directories
 3. Executables
 
-Each source has a match character:
+Search text can include a selector:
 
-1. Files: `f`
-2. Directories: `d`
-3. Executables: `c`
-
-There are two source kinds:
-
-1. Default sources always output values. Including `;x` in the query boosts
-   values from a source whose match character is `x`.
-2. Triggered sources only output values when `;x` appears in the query. They
-   receive the query text excluding the trigger.
+1. Files: `;f`
+2. Directories: `;d`
+3. Executables: `;c`
 
 Examples:
 
@@ -539,35 +512,10 @@ Examples:
 2. `;ddocres` searches directories for `docres`.
 3. `;creadl` searches executables for `readl`.
 
-Future triggered sources may include:
-
-1. Calculator, e.g. `;=`
-2. Content indexer, e.g. `;r`
-
-A calculator source for:
-
-```text
-1 + 3;=
-```
-
-could produce a top result like:
-
-```text
-4
-```
-
 # Sorting
 
-Results are sorted with a fast fuzzy matching algorithm similar to `fzf`.
-
-Source match characters affect scoring:
-
-1. For default sources, `;x` boosts matching-source values.
-2. For triggered sources, `;x` enables the source.
-
-The exact scoring formula is implementation-defined, but it must preserve the
-main interaction goal: the intended value should usually be reachable with very
-few typed characters.
+Results are sorted by fuzzy match quality. The intended value should usually be
+reachable with very few typed characters.
 
 # Key bindings
 
@@ -576,7 +524,7 @@ few typed characters.
 | Text input | Updates search in search mode; edits buffer in edit mode |
 | `[up]` / `[down]` | Move result selection |
 | `[tilde]` | Enter edit mode; normally seed from selected value |
-| Initial `[tilde]` | Enter edit mode with empty `Raw` buffer |
+| Initial `[tilde]` | Enter edit mode with an empty buffer that executes as typed |
 | `{` in search mode | Resolve current value, enter edit mode, then insert `{` |
 | `[tab]` | Resolve, compose, and queue |
 | `[ent]` | Resolve, compose, and execute if complete |
