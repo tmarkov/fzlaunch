@@ -283,6 +283,44 @@ mod tests {
     }
 
     #[test]
+    fn collected_sources_compose_nested_command_from_file_and_executables() {
+        let bin = temp_source_dir("path-source-composition");
+        write_file(bin.join("readlink"), 0o755);
+        write_file(bin.join("nvim"), 0o755);
+        let path = path_string(&[bin]);
+
+        let root = temp_source_dir("filesystem-source-composition");
+        let file = root.join("paper.pdf");
+        fs::write(&file, b"pdf").expect("test file should be written");
+
+        let commands = super::PathExecutables { path: &path };
+        let files = super::FilesystemRoot { root: &root };
+        let mut state = InputState::default();
+
+        state.feed(super::collect_candidates(&[&commands, &files]));
+
+        state.update_input(Value::raw(";fpaper"));
+        state.press_tab();
+
+        state.update_input(Value::raw(";creadl"));
+        state.press_tilde();
+        state.update_input(Value::raw("readlink -f {}"));
+        state.press_tab();
+
+        state.update_input(Value::raw(";cnvim"));
+        state.press_tilde();
+        state.update_input(Value::raw("nvim $({})"));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw(format!(
+                "nvim $(readlink -f '{}')",
+                file.to_str().expect("path should be utf-8")
+            )))
+        );
+    }
+
+    #[test]
     fn filesystem_source_returns_files_as_escaped_candidates() {
         let root = temp_source_dir("filesystem-source-file");
         let file = root.join("paper with spaces.pdf");
