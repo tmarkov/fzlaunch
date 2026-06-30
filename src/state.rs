@@ -435,6 +435,22 @@ mod tests {
     }
 
     #[test]
+    fn feed_reranks_new_candidates_against_existing_input() {
+        let mut state = LauncherState::default();
+
+        state.update_input(Value::raw(";fpaper"));
+        state.feed([
+            Candidate::new(Value::raw("paperclip"), 'c', None),
+            Candidate::new(Value::escaped("/home/user/files/paper.pdf"), 'f', None),
+        ]);
+
+        assert_eq!(
+            state.selected(),
+            Some(Value::escaped("/home/user/files/paper.pdf"))
+        );
+    }
+
+    #[test]
     fn update_input_with_no_matches_clears_selection() {
         let mut state = LauncherState::default();
 
