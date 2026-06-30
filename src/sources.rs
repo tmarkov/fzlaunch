@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::model::{Candidate, Value};
 use tokio::sync::mpsc;
@@ -22,8 +22,8 @@ pub struct PathExecutables<'a> {
     pub path: &'a str,
 }
 
-pub struct FilesystemRoot<'a> {
-    pub root: &'a Path,
+pub struct FilesystemRoot {
+    pub root: PathBuf,
 }
 
 pub fn collect_candidates(sources: &[&dyn Source]) -> Vec<Candidate> {
@@ -38,7 +38,10 @@ pub fn executables_from_path(path: &str) -> Vec<Candidate> {
 }
 
 pub fn filesystem_entries(root: &Path) -> Vec<Candidate> {
-    FilesystemRoot { root }.candidates()
+    FilesystemRoot {
+        root: root.to_path_buf(),
+    }
+    .candidates()
 }
 
 impl Source for PathExecutables<'_> {
@@ -74,49 +77,73 @@ impl Source for PathExecutables<'_> {
     }
 }
 
-impl Source for FilesystemRoot<'_> {
+impl Source for FilesystemRoot {
     fn candidates(&self) -> Vec<Candidate> {
         let mut paths = BTreeSet::new();
-        let mut pending = vec![self.root.to_path_buf()];
+        let mut pending = vec![self.root.clone()];
 
         while let Some(dir) = pending.pop() {
-            let Ok(entries) = fs::read_dir(dir) else {
-                continue;
-            };
-
-            for entry in entries.flatten() {
-                let Ok(metadata) = entry.metadata() else {
-                    continue;
-                };
-
-                let match_char = if metadata.is_file() {
-                    'f'
-                } else if metadata.is_dir() {
-                    pending.push(entry.path());
-                    'd'
-                } else {
-                    continue;
-                };
-
-                let Some(path) = entry.path().to_str().map(str::to_owned) else {
-                    continue;
-                };
-
-                paths.insert((path, match_char));
-            }
+            paths.extend(filesystem_paths_in_dir(dir, &mut pending));
         }
 
-        paths
-            .into_iter()
-            .map(|(path, match_char)| {
-                Candidate::new(
-                    Value::escaped(path),
-                    match_char,
-                    Some(Value::raw("xdg-open {}")),
-                )
-            })
-            .collect()
+        paths.into_iter().map(filesystem_candidate).collect()
     }
+}
+
+impl AsyncSource for FilesystemRoot {
+    fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
+        tokio::task::spawn_blocking(move || {
+            let mut pending = vec![self.root];
+
+            while let Some(dir) = pending.pop() {
+                let candidates = filesystem_paths_in_dir(dir, &mut pending)
+                    .into_iter()
+                    .map(filesystem_candidate)
+                    .collect::<Vec<_>>();
+                if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+}
+
+fn filesystem_paths_in_dir(dir: PathBuf, pending: &mut Vec<PathBuf>) -> BTreeSet<(String, char)> {
+    let mut paths = BTreeSet::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return paths;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+
+        let match_char = if metadata.is_file() {
+            'f'
+        } else if metadata.is_dir() {
+            pending.push(entry.path());
+            'd'
+        } else {
+            continue;
+        };
+
+        let Some(path) = entry.path().to_str().map(str::to_owned) else {
+            continue;
+        };
+
+        paths.insert((path, match_char));
+    }
+
+    paths
+}
+
+fn filesystem_candidate((path, match_char): (String, char)) -> Candidate {
+    Candidate::new(
+        Value::escaped(path),
+        match_char,
+        Some(Value::raw("xdg-open {}")),
+    )
 }
 
 #[cfg(test)]
@@ -127,6 +154,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::model::{Candidate, Value};
+    use crate::sources::AsyncSource;
     use crate::state::LauncherState;
 
     fn temp_source_dir(name: &str) -> PathBuf {
@@ -302,7 +330,7 @@ mod tests {
         fs::write(&file, b"pdf").expect("test file should be written");
 
         let commands = super::PathExecutables { path: &path };
-        let files = super::FilesystemRoot { root: &root };
+        let files = super::FilesystemRoot { root };
         let mut state = LauncherState::default();
 
         state.feed(super::collect_candidates(&[&commands, &files]));
@@ -344,6 +372,55 @@ mod tests {
                 Some(Value::raw("xdg-open {}"))
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn async_filesystem_source_emits_directory_batches_before_finishing() {
+        let root = temp_source_dir("filesystem-source-async");
+        let first = root.join("first.txt");
+        let nested = root.join("nested");
+        let second = nested.join("second.txt");
+        fs::write(&first, b"first").expect("first test file should be written");
+        fs::create_dir(&nested).expect("nested test directory should be created");
+        fs::write(&second, b"second").expect("second test file should be written");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+
+        let task = Box::new(super::FilesystemRoot { root }).stream_candidates(sender);
+        let first_batch = receiver
+            .recv()
+            .await
+            .expect("filesystem source should emit first batch");
+
+        assert_eq!(
+            first_batch,
+            vec![
+                Candidate::new(
+                    Value::escaped(first.to_str().expect("path should be utf-8")),
+                    'f',
+                    Some(Value::raw("xdg-open {}"))
+                ),
+                Candidate::new(
+                    Value::escaped(nested.to_str().expect("path should be utf-8")),
+                    'd',
+                    Some(Value::raw("xdg-open {}"))
+                ),
+            ]
+        );
+
+        let remaining = receiver
+            .recv()
+            .await
+            .expect("filesystem source should emit nested batch");
+        assert_eq!(
+            remaining,
+            vec![Candidate::new(
+                Value::escaped(second.to_str().expect("path should be utf-8")),
+                'f',
+                Some(Value::raw("xdg-open {}"))
+            )]
+        );
+
+        task.await.expect("filesystem source task should finish");
     }
 
     #[test]
