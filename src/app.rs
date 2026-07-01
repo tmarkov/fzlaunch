@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
 use crate::model::{Candidate, Value};
+use crate::shell;
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
 use crate::state::{InputMode, LauncherState};
+use crate::ui::tui;
+use tokio::sync::mpsc::error::TryRecvError;
 
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 
@@ -13,7 +16,26 @@ pub struct Governor {
 }
 
 pub fn run() {
-    println!("fzlaunch scaffold");
+    if let Err(error) = run_inner() {
+        eprintln!("fzlaunch: {error}");
+    }
+}
+
+fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let path = std::env::var("PATH").unwrap_or_default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?;
+
+    if let Some(command) = runtime.block_on(async {
+        let mut governor = Governor::start(cwd, &path);
+        tui::run(&mut governor).await
+    })? {
+        println!("{}", shell::render_value(&command));
+    }
+
+    Ok(())
 }
 
 impl Governor {
@@ -88,6 +110,14 @@ impl Governor {
         self.state.selected()
     }
 
+    pub fn results(&self) -> Vec<Value> {
+        self.state.results()
+    }
+
+    pub fn selected_index(&self) -> Option<usize> {
+        self.state.selected_index()
+    }
+
     pub async fn receive_candidates(&mut self) -> bool {
         let Some(candidates) = self.candidate_receiver.recv().await else {
             return false;
@@ -95,6 +125,21 @@ impl Governor {
 
         self.state.feed(candidates);
         true
+    }
+
+    pub fn receive_pending_candidates(&mut self) -> usize {
+        let mut batches = 0;
+
+        loop {
+            match self.candidate_receiver.try_recv() {
+                Ok(candidates) => {
+                    self.state.feed(candidates);
+                    batches += 1;
+                }
+                Err(TryRecvError::Empty) => return batches,
+                Err(TryRecvError::Disconnected) => return batches,
+            }
+        }
     }
 }
 

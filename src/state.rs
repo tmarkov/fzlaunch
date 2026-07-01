@@ -209,6 +209,17 @@ impl LauncherState {
             .map(|candidate| candidate.value().clone())
     }
 
+    pub fn results(&self) -> Vec<Value> {
+        self.results
+            .iter()
+            .map(|candidate| candidate.value().clone())
+            .collect()
+    }
+
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selected_index
+    }
+
     fn reset_input(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
