@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use crate::model::Value;
+use crate::model::{Candidate, Value};
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
-use crate::state::LauncherState;
+use crate::state::{InputMode, LauncherState};
 
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 
@@ -44,6 +44,46 @@ impl Governor {
         self.state.update_input(value);
     }
 
+    pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
+        self.state.feed(candidates);
+    }
+
+    pub fn select_next(&mut self) {
+        self.state.select_next();
+    }
+
+    pub fn select_previous(&mut self) {
+        self.state.select_previous();
+    }
+
+    pub fn press_tilde(&mut self) {
+        self.state.press_tilde();
+    }
+
+    pub fn press_tab(&mut self) {
+        self.state.press_tab();
+    }
+
+    pub fn press_enter(&mut self) -> Option<Value> {
+        self.state.press_enter()
+    }
+
+    pub fn queue_status(&self) -> Option<String> {
+        self.state.queue_status()
+    }
+
+    pub fn mode(&self) -> InputMode {
+        self.state.mode()
+    }
+
+    pub fn value(&self) -> Value {
+        self.state.value()
+    }
+
+    pub fn current(&self) -> Value {
+        self.state.current()
+    }
+
     pub fn selected(&self) -> Option<Value> {
         self.state.selected()
     }
@@ -78,7 +118,6 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use crate::model::Candidate;
     use crate::sources::CandidateSender;
 
     struct MockSource {
@@ -141,6 +180,39 @@ mod tests {
         governor
             .selected()
             .expect("governor should have selected value")
+    }
+
+    #[test]
+    fn governor_forwards_launcher_state_operations() {
+        let mut governor = Governor::with_sources([]);
+
+        governor.feed([
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
+            Candidate::new(Value::raw("nvim"), 'c', None),
+        ]);
+        governor.update_input(Value::raw(";fpaper"));
+
+        assert_eq!(
+            governor.selected(),
+            Some(Value::escaped("/home/me/paper.pdf"))
+        );
+        assert_eq!(governor.current(), Value::escaped("/home/me/paper.pdf"));
+
+        governor.press_tab();
+        assert_eq!(governor.queue_status(), Some("'/home/me/paper.pdf'".into()));
+
+        governor.update_input(Value::raw(";cnvim"));
+        assert_eq!(governor.selected(), Some(Value::raw("nvim")));
+
+        governor.press_tilde();
+        assert_eq!(governor.mode(), InputMode::Edit);
+        assert_eq!(governor.value(), Value::raw("nvim"));
+
+        governor.update_input(Value::raw("nvim {}"));
+        assert_eq!(
+            governor.press_enter(),
+            Some(Value::raw("nvim '/home/me/paper.pdf'"))
+        );
     }
 
     #[tokio::test(start_paused = true)]
