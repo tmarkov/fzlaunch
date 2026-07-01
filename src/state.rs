@@ -1,11 +1,17 @@
 use crate::model::{Candidate, Queue, Value};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Search,
     Edit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultRow {
+    pub haystack: String,
+    pub match_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,8 +215,49 @@ impl LauncherState {
             .map(|candidate| candidate.value().clone())
     }
 
-    pub fn results(&self) -> Vec<String> {
-        self.results.iter().map(candidate_haystack).collect()
+    pub fn results(&self) -> Vec<ResultRow> {
+        let haystacks = self
+            .results
+            .iter()
+            .map(candidate_haystack)
+            .collect::<Vec<_>>();
+        if self.value.editable_text.is_empty() {
+            return haystacks
+                .into_iter()
+                .map(|haystack| ResultRow {
+                    haystack,
+                    match_indices: Vec::new(),
+                })
+                .collect();
+        }
+
+        let pattern = Pattern::parse(
+            &self.value.editable_text,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+        );
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut buf = Vec::new();
+        let mut indices = Vec::new();
+
+        haystacks
+            .into_iter()
+            .map(|haystack| {
+                indices.clear();
+                let _ = pattern.indices(
+                    Utf32Str::new(&haystack, &mut buf),
+                    &mut matcher,
+                    &mut indices,
+                );
+                indices.sort_unstable();
+                indices.dedup();
+
+                ResultRow {
+                    haystack,
+                    match_indices: indices.iter().map(|index| *index as usize).collect(),
+                }
+            })
+            .collect()
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -350,9 +397,35 @@ mod tests {
         assert_eq!(
             state.results(),
             vec![
-                ";c firefox".to_string(),
-                ";f /home/me/paper.pdf".to_string()
+                ResultRow {
+                    haystack: ";c firefox".to_string(),
+                    match_indices: Vec::new(),
+                },
+                ResultRow {
+                    haystack: ";f /home/me/paper.pdf".to_string(),
+                    match_indices: Vec::new(),
+                }
             ]
+        );
+    }
+
+    #[test]
+    fn results_include_matched_haystack_indices() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
+        state.update_input(Value::raw("paper"));
+
+        assert_eq!(
+            state.results(),
+            vec![ResultRow {
+                haystack: ";f /home/me/paper.pdf".to_string(),
+                match_indices: vec![12, 13, 14, 15, 16],
+            }]
         );
     }
 

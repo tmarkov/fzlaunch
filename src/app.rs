@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::model::{Candidate, Value};
 use crate::shell;
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
-use crate::state::{InputMode, LauncherState};
+use crate::state::{InputMode, LauncherState, ResultRow};
 use crate::ui::tui;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -110,7 +110,7 @@ impl Governor {
         self.state.selected()
     }
 
-    pub fn results(&self) -> Vec<String> {
+    pub fn results(&self) -> Vec<ResultRow> {
         self.state.results()
     }
 

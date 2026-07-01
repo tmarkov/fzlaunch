@@ -14,9 +14,10 @@ use ratatui::{Frame, Terminal};
 
 use crate::app::Governor;
 use crate::model::Value;
-use crate::state::InputMode;
+use crate::state::{InputMode, ResultRow};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
+const RESULT_HIGHLIGHT_SYMBOL: &str = "> ";
 
 pub async fn run(governor: &mut Governor) -> io::Result<Option<Value>> {
     let mut terminal = TerminalSession::enter()?;
@@ -168,7 +169,7 @@ fn render_queue(frame: &mut Frame<'_>, area: Rect, text: String) {
 fn render_results(
     frame: &mut Frame<'_>,
     area: Rect,
-    results: Vec<String>,
+    results: Vec<ResultRow>,
     selected_index: Option<usize>,
 ) {
     let total = results.len();
@@ -176,11 +177,12 @@ fn render_results(
     let selected = selected_index.unwrap_or(0);
     let first_visible = selected.saturating_sub(visible_count.saturating_sub(1));
     let selected_visible = selected_index.map(|index| index.saturating_sub(first_visible));
+    let row_width = result_row_width(area, selected_index.is_some());
     let items = results
         .into_iter()
         .skip(first_visible)
         .take(visible_count)
-        .map(ListItem::new)
+        .map(|row| ListItem::new(result_line(row, row_width)))
         .collect::<Vec<_>>();
     let title = format!(" results ({total}) ");
     let list = List::new(items)
@@ -190,7 +192,7 @@ fn render_results(
                 .border_style(Style::new().fg(Color::DarkGray))
                 .title(Span::styled(title, Style::new().fg(Color::Gray))),
         )
-        .highlight_symbol("> ")
+        .highlight_symbol(RESULT_HIGHLIGHT_SYMBOL)
         .highlight_style(
             Style::new()
                 .bg(Color::Blue)
@@ -200,6 +202,123 @@ fn render_results(
     let mut state = ListState::default();
     state.select(selected_visible);
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn result_line(row: ResultRow, max_width: usize) -> Line<'static> {
+    let chars = truncate_middle(&row.haystack, max_width);
+    let mut spans = Vec::new();
+    let mut text = String::new();
+    let mut highlighted = None;
+
+    for display_char in chars {
+        let is_highlighted = display_char
+            .source_index
+            .is_some_and(|index| row.match_indices.binary_search(&index).is_ok());
+
+        if highlighted == Some(is_highlighted) {
+            text.push(display_char.ch);
+            continue;
+        }
+
+        if !text.is_empty() {
+            spans.push(styled_result_span(std::mem::take(&mut text), highlighted));
+        }
+
+        highlighted = Some(is_highlighted);
+        text.push(display_char.ch);
+    }
+
+    if !text.is_empty() {
+        spans.push(styled_result_span(text, highlighted));
+    }
+
+    Line::from(spans)
+}
+
+fn result_row_width(area: Rect, has_selection: bool) -> usize {
+    let border_width = 2;
+    let highlight_width = if has_selection {
+        RESULT_HIGHLIGHT_SYMBOL.len() as u16
+    } else {
+        0
+    };
+
+    area.width.saturating_sub(border_width + highlight_width) as usize
+}
+
+fn styled_result_span(text: String, highlighted: Option<bool>) -> Span<'static> {
+    if highlighted == Some(true) {
+        Span::styled(
+            text,
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw(text)
+    }
+}
+
+struct DisplayChar {
+    ch: char,
+    source_index: Option<usize>,
+}
+
+fn truncate_middle(text: &str, max_width: usize) -> Vec<DisplayChar> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_width {
+        return chars
+            .into_iter()
+            .enumerate()
+            .map(|(index, ch)| DisplayChar {
+                ch,
+                source_index: Some(index),
+            })
+            .collect();
+    }
+
+    if max_width <= 3 {
+        return chars
+            .into_iter()
+            .take(max_width)
+            .enumerate()
+            .map(|(index, ch)| DisplayChar {
+                ch,
+                source_index: Some(index),
+            })
+            .collect();
+    }
+
+    let prefix_len = text
+        .find(' ')
+        .map(|space| text[..=space].chars().count())
+        .unwrap_or(0)
+        .min(max_width.saturating_sub(3));
+    let suffix_len = max_width - prefix_len - 3;
+    let suffix_start = chars.len() - suffix_len;
+
+    let prefix = chars
+        .iter()
+        .copied()
+        .take(prefix_len)
+        .enumerate()
+        .map(|(index, ch)| DisplayChar {
+            ch,
+            source_index: Some(index),
+        });
+    let ellipsis = "...".chars().map(|ch| DisplayChar {
+        ch,
+        source_index: None,
+    });
+    let suffix = chars
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(suffix_start)
+        .map(|(index, ch)| DisplayChar {
+            ch,
+            source_index: Some(index),
+        });
+
+    prefix.chain(ellipsis).chain(suffix).collect()
 }
 
 fn mode_style(mode: InputMode) -> Style {
@@ -254,6 +373,47 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn displayed_text(chars: Vec<DisplayChar>) -> String {
+        chars
+            .into_iter()
+            .map(|display_char| display_char.ch)
+            .collect()
+    }
+
+    #[test]
+    fn long_result_rows_keep_selector_and_end_visible() {
+        assert_eq!(
+            displayed_text(truncate_middle(";f /home/todor/dev/fzlaunch/flake.nix", 32)),
+            ";f ...dor/dev/fzlaunch/flake.nix"
+        );
+    }
+
+    #[test]
+    fn result_row_width_accounts_for_selected_row_marker() {
+        assert_eq!(result_row_width(Rect::new(0, 0, 80, 10), true), 76);
+        assert_eq!(result_row_width(Rect::new(0, 0, 80, 10), false), 78);
+    }
+
+    #[test]
+    fn result_line_highlights_matched_characters() {
+        let line = result_line(
+            ResultRow {
+                haystack: ";f /home/me/paper.pdf".to_string(),
+                match_indices: vec![12, 13, 14, 15, 16],
+            },
+            80,
+        );
+
+        let highlighted = line
+            .spans
+            .iter()
+            .filter(|span| span.style.fg == Some(Color::Yellow))
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(highlighted, vec!["paper"]);
     }
 
     #[test]
