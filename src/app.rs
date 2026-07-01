@@ -110,7 +110,7 @@ impl Governor {
         self.state.selected()
     }
 
-    pub fn results(&self) -> Vec<Value> {
+    pub fn results(&self) -> Vec<String> {
         self.state.results()
     }
 

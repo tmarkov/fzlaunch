@@ -6,9 +6,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self as crossterm_terminal, Clear, ClearType};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::app::Governor;
@@ -16,7 +17,6 @@ use crate::model::Value;
 use crate::state::InputMode;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
-const RESULT_LIMIT: usize = 12;
 
 pub async fn run(governor: &mut Governor) -> io::Result<Option<Value>> {
     let mut terminal = TerminalSession::enter()?;
@@ -101,40 +101,112 @@ fn render(frame: &mut Frame<'_>, governor: &Governor) {
         InputMode::Edit => "edit",
     };
     let queue = governor.queue_status().unwrap_or_default();
-    let current = governor.current().editable_text;
     let results = governor.results();
     let selected_index = governor.selected_index();
+
+    let area = frame.area();
+    let shell = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(Line::from(vec![
+            Span::styled(" fzlaunch ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {mode} "), mode_style(governor.mode())),
+        ]));
+    let shell_area = shell.inner(area);
+    frame.render_widget(shell, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(0),
         ])
-        .split(frame.area());
+        .split(shell_area);
 
-    frame.render_widget(Paragraph::new(format!("fzlaunch [{mode}]")), chunks[0]);
+    render_input(frame, chunks[0], input.editable_text, governor.mode());
+    render_queue(frame, chunks[1], queue);
+    render_results(frame, chunks[2], results, selected_index);
+}
+
+fn render_input(frame: &mut Frame<'_>, area: Rect, input: String, mode: InputMode) {
+    let accent = mode_style(mode);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(accent)
+        .title(Span::styled(" input ", accent));
+    let line = Line::from(vec![
+        Span::styled("> ", accent.add_modifier(Modifier::BOLD)),
+        Span::raw(input),
+    ]);
+
+    frame.render_widget(Paragraph::new(line).block(block), area);
+}
+
+fn render_queue(frame: &mut Frame<'_>, area: Rect, text: String) {
+    let empty = text.is_empty();
+    let text = if empty { "empty".to_string() } else { text };
+    let style = if empty {
+        Style::new().fg(Color::DarkGray)
+    } else {
+        Style::new()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(Span::styled(" queue ", Style::new().fg(Color::Gray)));
+
     frame.render_widget(
-        Paragraph::new(format!("> {}", input.editable_text)),
-        chunks[1],
+        Paragraph::new(text)
+            .style(style)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
     );
-    frame.render_widget(Paragraph::new(format!("queue: {queue}")), chunks[2]);
-    frame.render_widget(Paragraph::new(format!("current: {current}")), chunks[3]);
-    frame.render_widget(Paragraph::new("results"), chunks[4]);
+}
 
+fn render_results(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    results: Vec<String>,
+    selected_index: Option<usize>,
+) {
+    let total = results.len();
+    let visible_count = area.height.saturating_sub(2).max(1) as usize;
+    let selected = selected_index.unwrap_or(0);
+    let first_visible = selected.saturating_sub(visible_count.saturating_sub(1));
+    let selected_visible = selected_index.map(|index| index.saturating_sub(first_visible));
     let items = results
         .into_iter()
-        .take(RESULT_LIMIT)
-        .map(|value| ListItem::new(value.editable_text))
+        .skip(first_visible)
+        .take(visible_count)
+        .map(ListItem::new)
         .collect::<Vec<_>>();
-    let list = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    let title = format!(" results ({total}) ");
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(Color::DarkGray))
+                .title(Span::styled(title, Style::new().fg(Color::Gray))),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(
+            Style::new()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
     let mut state = ListState::default();
-    state.select(selected_index);
-    frame.render_stateful_widget(list, chunks[5], &mut state);
+    state.select(selected_visible);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn mode_style(mode: InputMode) -> Style {
+    match mode {
+        InputMode::Search => Style::new().fg(Color::Cyan),
+        InputMode::Edit => Style::new().fg(Color::Yellow),
+    }
 }
 
 struct TerminalSession {

@@ -209,11 +209,8 @@ impl LauncherState {
             .map(|candidate| candidate.value().clone())
     }
 
-    pub fn results(&self) -> Vec<Value> {
-        self.results
-            .iter()
-            .map(|candidate| candidate.value().clone())
-            .collect()
+    pub fn results(&self) -> Vec<String> {
+        self.results.iter().map(candidate_haystack).collect()
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -339,6 +336,24 @@ mod tests {
         ]);
 
         assert_eq!(state.selected(), Some(Value::raw("firefox")));
+    }
+
+    #[test]
+    fn results_show_candidate_haystacks() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("firefox"), 'c', None),
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
+        ]);
+
+        assert_eq!(
+            state.results(),
+            vec![
+                ";c firefox".to_string(),
+                ";f /home/me/paper.pdf".to_string()
+            ]
+        );
     }
 
     #[test]
