@@ -1,8 +1,10 @@
+use std::path::PathBuf;
+
 use crate::model::Value;
-use crate::sources::{AsyncSource, CandidateReceiver};
+use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
 use crate::state::LauncherState;
 
-const CANDIDATE_BATCH_BUFFER: usize = 128;
+const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 
 pub struct Governor {
     state: LauncherState,
@@ -15,8 +17,15 @@ pub fn run() {
 }
 
 impl Governor {
-    pub fn start(sources: impl IntoIterator<Item = Box<dyn AsyncSource>>) -> Self {
-        let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_BATCH_BUFFER);
+    pub fn start(cwd: PathBuf, path: &str) -> Self {
+        Self::with_sources([
+            Box::new(FilesystemRoot { root: cwd }) as Box<dyn AsyncSource>,
+            Box::new(PathExecutables::from_path(path)) as Box<dyn AsyncSource>,
+        ])
+    }
+
+    pub fn with_sources(sources: impl IntoIterator<Item = Box<dyn AsyncSource>>) -> Self {
+        let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
         let source_tasks = sources
             .into_iter()
             .map(|source| source.stream_candidates(sender.clone()))
@@ -59,7 +68,11 @@ impl Drop for Governor {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use tokio::task::JoinHandle;
     use tokio::time;
@@ -102,11 +115,39 @@ mod tests {
         assert!(governor.receive_candidates().await);
     }
 
+    fn temp_app_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fzlaunch-{name}-{unique}"));
+        fs::create_dir(&path).expect("temp app dir should be created");
+        path
+    }
+
+    fn path_string(dirs: &[PathBuf]) -> String {
+        std::env::join_paths(dirs)
+            .expect("test paths should join")
+            .to_str()
+            .expect("test path should be utf-8")
+            .to_string()
+    }
+
+    async fn receive_until_selected(governor: &mut Governor) -> Value {
+        while governor.selected().is_none() {
+            assert!(governor.receive_candidates().await);
+        }
+
+        governor
+            .selected()
+            .expect("governor should have selected value")
+    }
+
     #[tokio::test(start_paused = true)]
     async fn governor_updates_ranking_as_input_and_candidates_arrive() {
         let sources =
             vec![Box::new(MockSource::new(Duration::from_millis(100))) as Box<dyn AsyncSource>];
-        let mut governor = Governor::start(sources);
+        let mut governor = Governor::with_sources(sources);
 
         governor.update_input(Value::raw(";m 10"));
         receive_next_candidate(&mut governor).await;
@@ -132,5 +173,51 @@ mod tests {
         }
 
         assert_eq!(governor.selected(), Some(Value::raw("10 00")));
+    }
+
+    #[tokio::test]
+    async fn governor_feeds_async_filesystem_candidates_into_state() {
+        let root = temp_app_dir("governor-filesystem");
+        let nested = root.join("Documents");
+        let file = nested.join("paper.pdf");
+        fs::create_dir(&nested).expect("nested test directory should be created");
+        fs::write(&file, b"pdf").expect("test file should be written");
+        let mut governor = Governor::start(root, "");
+
+        governor.update_input(Value::raw(";fpaper"));
+        assert_eq!(governor.selected(), None);
+
+        assert_eq!(
+            receive_until_selected(&mut governor).await,
+            Value::escaped(file.to_str().expect("path should be utf-8"))
+        );
+    }
+
+    #[tokio::test]
+    async fn governor_receives_cwd_and_path_sources() {
+        let root = temp_app_dir("governor-default-root");
+        let file = root.join("paper.pdf");
+        fs::write(&file, b"pdf").expect("test file should be written");
+        let bin = temp_app_dir("governor-default-path");
+        fs::write(bin.join("fzlaunch-run-me"), b"#!/bin/sh\n")
+            .expect("test executable should be written");
+        fs::set_permissions(
+            bin.join("fzlaunch-run-me"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("test executable permissions should be set");
+        let mut governor = Governor::start(root, &path_string(&[bin]));
+
+        governor.update_input(Value::raw(";fpaper"));
+        assert_eq!(
+            receive_until_selected(&mut governor).await,
+            Value::escaped(file.to_str().expect("path should be utf-8"))
+        );
+
+        governor.update_input(Value::raw(";crun"));
+        assert_eq!(
+            receive_until_selected(&mut governor).await,
+            Value::raw("fzlaunch-run-me")
+        );
     }
 }

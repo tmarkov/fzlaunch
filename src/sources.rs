@@ -18,8 +18,8 @@ pub trait AsyncSource: Send + 'static {
     fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()>;
 }
 
-pub struct PathExecutables<'a> {
-    pub path: &'a str,
+pub struct PathExecutables {
+    pub dirs: Vec<PathBuf>,
 }
 
 pub struct FilesystemRoot {
@@ -34,7 +34,7 @@ pub fn collect_candidates(sources: &[&dyn Source]) -> Vec<Candidate> {
 }
 
 pub fn executables_from_path(path: &str) -> Vec<Candidate> {
-    PathExecutables { path }.candidates()
+    PathExecutables::from_path(path).candidates()
 }
 
 pub fn filesystem_entries(root: &Path) -> Vec<Candidate> {
@@ -44,36 +44,47 @@ pub fn filesystem_entries(root: &Path) -> Vec<Candidate> {
     .candidates()
 }
 
-impl Source for PathExecutables<'_> {
+impl PathExecutables {
+    pub fn from_path(path: &str) -> Self {
+        let dirs = if path.is_empty() {
+            Vec::new()
+        } else {
+            std::env::split_paths(path).collect()
+        };
+
+        Self { dirs }
+    }
+}
+
+impl Source for PathExecutables {
     fn candidates(&self) -> Vec<Candidate> {
         let mut commands = BTreeSet::new();
 
-        for dir in std::env::split_paths(self.path) {
-            let Ok(entries) = fs::read_dir(dir) else {
-                continue;
-            };
-
-            for entry in entries.flatten() {
-                let Ok(metadata) = entry.metadata() else {
-                    continue;
-                };
-
-                if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-                    continue;
-                }
-
-                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-
-                commands.insert(name);
-            }
+        for dir in &self.dirs {
+            commands.extend(executable_commands_in_dir(dir));
         }
 
-        commands
-            .into_iter()
-            .map(|command| Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}"))))
-            .collect()
+        commands.into_iter().map(executable_candidate).collect()
+    }
+}
+
+impl AsyncSource for PathExecutables {
+    fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
+        tokio::task::spawn_blocking(move || {
+            let mut seen = BTreeSet::new();
+
+            for dir in self.dirs {
+                let candidates = executable_commands_in_dir(&dir)
+                    .into_iter()
+                    .filter(|command| seen.insert(command.clone()))
+                    .map(executable_candidate)
+                    .collect::<Vec<_>>();
+
+                if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
+                    break;
+                }
+            }
+        })
     }
 }
 
@@ -136,6 +147,35 @@ fn filesystem_paths_in_dir(dir: PathBuf, pending: &mut Vec<PathBuf>) -> BTreeSet
     }
 
     paths
+}
+
+fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
+    let mut commands = BTreeSet::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return commands;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+
+        commands.insert(name);
+    }
+
+    commands
+}
+
+fn executable_candidate(command: String) -> Candidate {
+    Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}")))
 }
 
 fn filesystem_candidate((path, match_char): (String, char)) -> Candidate {
@@ -304,6 +344,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn async_path_source_streams_multiple_path_dirs() {
+        let first = temp_source_dir("path-source-async-first");
+        let second = temp_source_dir("path-source-async-second");
+        write_file(first.join("first-command"), 0o755);
+        write_file(second.join("second-command"), 0o755);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+
+        let task = Box::new(super::PathExecutables::from_path(&path_string(&[
+            first, second,
+        ])))
+        .stream_candidates(sender);
+        let first_batch = receiver
+            .recv()
+            .await
+            .expect("path source should emit first dir batch");
+        let second_batch = receiver
+            .recv()
+            .await
+            .expect("path source should emit second dir batch");
+
+        assert_eq!(
+            first_batch,
+            vec![Candidate::new(
+                Value::raw("first-command"),
+                'c',
+                Some(Value::raw("{}"))
+            )]
+        );
+        assert_eq!(
+            second_batch,
+            vec![Candidate::new(
+                Value::raw("second-command"),
+                'c',
+                Some(Value::raw("{}"))
+            )]
+        );
+
+        task.await.expect("path source task should finish");
+    }
+
     #[test]
     fn executable_source_candidates_feed_into_launcher_state() {
         let bin = temp_source_dir("path-source-launcher-state");
@@ -329,7 +410,7 @@ mod tests {
         let file = root.join("paper.pdf");
         fs::write(&file, b"pdf").expect("test file should be written");
 
-        let commands = super::PathExecutables { path: &path };
+        let commands = super::PathExecutables::from_path(&path);
         let files = super::FilesystemRoot { root };
         let mut state = LauncherState::default();
 
