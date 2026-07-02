@@ -11,7 +11,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 const PREVIEW_OUTPUT_LIMIT: usize = 64 * 1024;
 
-pub struct Governor {
+pub struct App {
     state: LauncherState,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -46,8 +46,8 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     if let Some(command) = runtime.block_on(async {
-        let mut governor = Governor::start(cwd, &path);
-        tui::run(&mut governor).await
+        let mut app = App::start(cwd, &path);
+        tui::run(&mut app).await
     })? {
         println!("{}", shell::render_value(&command));
     }
@@ -55,7 +55,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-impl Governor {
+impl App {
     pub fn start(cwd: PathBuf, path: &str) -> Self {
         Self::with_sources([
             Box::new(FilesystemRoot { root: cwd }) as Box<dyn AsyncSource>,
@@ -136,10 +136,6 @@ impl Governor {
         self.state.selected_index()
     }
 
-    pub fn selected_preview_command(&self) -> Option<String> {
-        self.state.selected_preview_command()
-    }
-
     pub fn refresh_preview(&mut self) {
         let command = self.state.selected_preview_command();
         if self.preview.command == command {
@@ -216,7 +212,7 @@ fn limit_preview_output(text: &str) -> String {
     }
 }
 
-impl Drop for Governor {
+impl Drop for App {
     fn drop(&mut self) {
         for task in &self.source_tasks {
             task.abort();
@@ -267,9 +263,9 @@ mod tests {
         }
     }
 
-    async fn receive_next_candidate(governor: &mut Governor) {
+    async fn receive_next_candidate(app: &mut App) {
         time::advance(Duration::from_millis(100)).await;
-        assert!(governor.receive_candidates().await);
+        assert!(app.receive_candidates().await);
     }
 
     fn temp_app_dir(name: &str) -> PathBuf {
@@ -290,14 +286,12 @@ mod tests {
             .to_string()
     }
 
-    async fn receive_until_selected(governor: &mut Governor) -> Value {
-        while governor.selected().is_none() {
-            assert!(governor.receive_candidates().await);
+    async fn receive_until_selected(app: &mut App) -> Value {
+        while app.selected().is_none() {
+            assert!(app.receive_candidates().await);
         }
 
-        governor
-            .selected()
-            .expect("governor should have selected value")
+        app.selected().expect("app should have selected value")
     }
 
     #[test]
@@ -314,108 +308,105 @@ mod tests {
     }
 
     #[test]
-    fn governor_refreshes_preview_for_selected_candidate() {
-        let mut governor = Governor::with_sources([]);
+    fn app_refreshes_preview_for_selected_candidate() {
+        let mut app = App::with_sources([]);
 
-        governor.feed([
+        app.feed([
             Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None)
                 .with_preview_command(Some(Value::raw("printf 'paper preview'"))),
         ]);
-        governor.update_input(Value::raw(";fpaper"));
-        governor.refresh_preview();
+        app.update_input(Value::raw(";fpaper"));
+        app.refresh_preview();
 
-        assert_eq!(governor.preview_output(), "paper preview");
+        assert_eq!(app.preview_output(), "paper preview");
     }
 
     #[test]
-    fn governor_forwards_launcher_state_operations() {
-        let mut governor = Governor::with_sources([]);
+    fn app_forwards_launcher_state_operations() {
+        let mut app = App::with_sources([]);
 
-        governor.feed([
+        app.feed([
             Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
             Candidate::new(Value::raw("nvim"), 'c', None),
         ]);
-        governor.update_input(Value::raw(";fpaper"));
+        app.update_input(Value::raw(";fpaper"));
 
+        assert_eq!(app.selected(), Some(Value::escaped("/home/me/paper.pdf")));
+        assert_eq!(app.current(), Value::escaped("/home/me/paper.pdf"));
+
+        app.press_tab();
+        assert_eq!(app.queue_status(), Some("'/home/me/paper.pdf'".into()));
+
+        app.update_input(Value::raw(";cnvim"));
+        assert_eq!(app.selected(), Some(Value::raw("nvim")));
+
+        app.press_tilde();
+        assert_eq!(app.mode(), InputMode::Edit);
+        assert_eq!(app.value(), Value::raw("nvim"));
+
+        app.update_input(Value::raw("nvim {}"));
         assert_eq!(
-            governor.selected(),
-            Some(Value::escaped("/home/me/paper.pdf"))
-        );
-        assert_eq!(governor.current(), Value::escaped("/home/me/paper.pdf"));
-
-        governor.press_tab();
-        assert_eq!(governor.queue_status(), Some("'/home/me/paper.pdf'".into()));
-
-        governor.update_input(Value::raw(";cnvim"));
-        assert_eq!(governor.selected(), Some(Value::raw("nvim")));
-
-        governor.press_tilde();
-        assert_eq!(governor.mode(), InputMode::Edit);
-        assert_eq!(governor.value(), Value::raw("nvim"));
-
-        governor.update_input(Value::raw("nvim {}"));
-        assert_eq!(
-            governor.press_enter(),
+            app.press_enter(),
             Some(Value::raw("nvim '/home/me/paper.pdf'"))
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn governor_updates_ranking_as_input_and_candidates_arrive() {
+    async fn app_updates_ranking_as_input_and_candidates_arrive() {
         let sources =
             vec![Box::new(MockSource::new(Duration::from_millis(100))) as Box<dyn AsyncSource>];
-        let mut governor = Governor::with_sources(sources);
+        let mut app = App::with_sources(sources);
 
-        governor.update_input(Value::raw(";m 10"));
-        receive_next_candidate(&mut governor).await;
-        assert_eq!(governor.selected(), None);
+        app.update_input(Value::raw(";m 10"));
+        receive_next_candidate(&mut app).await;
+        assert_eq!(app.selected(), None);
 
-        receive_next_candidate(&mut governor).await;
-        assert_eq!(governor.selected(), Some(Value::raw("1 00")));
+        receive_next_candidate(&mut app).await;
+        assert_eq!(app.selected(), Some(Value::raw("1 00")));
 
-        governor.update_input(Value::raw(";m 50"));
-        assert_eq!(governor.selected(), None);
+        app.update_input(Value::raw(";m 50"));
+        assert_eq!(app.selected(), None);
 
         for _ in 2..=5 {
-            receive_next_candidate(&mut governor).await;
+            receive_next_candidate(&mut app).await;
         }
 
-        assert_eq!(governor.selected(), Some(Value::raw("5 00")));
+        assert_eq!(app.selected(), Some(Value::raw("5 00")));
 
-        governor.update_input(Value::raw(";m 10"));
-        assert_eq!(governor.selected(), Some(Value::raw("1 00")));
+        app.update_input(Value::raw(";m 10"));
+        assert_eq!(app.selected(), Some(Value::raw("1 00")));
 
         for _ in 6..=10 {
-            receive_next_candidate(&mut governor).await;
+            receive_next_candidate(&mut app).await;
         }
 
-        assert_eq!(governor.selected(), Some(Value::raw("10 00")));
+        assert_eq!(app.selected(), Some(Value::raw("10 00")));
     }
 
     #[tokio::test]
-    async fn governor_feeds_async_filesystem_candidates_into_state() {
-        let root = temp_app_dir("governor-filesystem");
+    async fn app_feeds_async_filesystem_candidates_into_state() {
+        let root = temp_app_dir("app-filesystem");
         let nested = root.join("Documents");
         let file = nested.join("paper.pdf");
         fs::create_dir(&nested).expect("nested test directory should be created");
         fs::write(&file, b"pdf").expect("test file should be written");
-        let mut governor = Governor::start(root, "");
+        let mut app = App::start(root, "");
 
-        governor.update_input(Value::raw(";fpaper"));
-        assert_eq!(governor.selected(), None);
+        app.update_input(Value::raw(";fpaper"));
+        assert_eq!(app.selected(), None);
 
         assert_eq!(
-            receive_until_selected(&mut governor).await,
+            receive_until_selected(&mut app).await,
             Value::escaped(file.to_str().expect("path should be utf-8"))
         );
     }
 
     #[tokio::test]
-    async fn governor_receives_cwd_and_path_sources() {
-        let root = temp_app_dir("governor-default-root");
+    async fn app_receives_cwd_and_path_sources() {
+        let root = temp_app_dir("app-default-root");
         let file = root.join("paper.pdf");
         fs::write(&file, b"pdf").expect("test file should be written");
-        let bin = temp_app_dir("governor-default-path");
+        let bin = temp_app_dir("app-default-path");
         fs::write(bin.join("fzlaunch-run-me"), b"#!/bin/sh\n")
             .expect("test executable should be written");
         fs::set_permissions(
@@ -423,17 +414,17 @@ mod tests {
             fs::Permissions::from_mode(0o755),
         )
         .expect("test executable permissions should be set");
-        let mut governor = Governor::start(root, &path_string(&[bin]));
+        let mut app = App::start(root, &path_string(&[bin]));
 
-        governor.update_input(Value::raw(";fpaper"));
+        app.update_input(Value::raw(";fpaper"));
         assert_eq!(
-            receive_until_selected(&mut governor).await,
+            receive_until_selected(&mut app).await,
             Value::escaped(file.to_str().expect("path should be utf-8"))
         );
 
-        governor.update_input(Value::raw(";crun"));
+        app.update_input(Value::raw(";crun"));
         assert_eq!(
-            receive_until_selected(&mut governor).await,
+            receive_until_selected(&mut app).await,
             Value::raw("fzlaunch-run-me")
         );
     }

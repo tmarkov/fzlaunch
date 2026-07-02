@@ -12,24 +12,24 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::app::Governor;
+use crate::app::App;
 use crate::model::Value;
 use crate::state::{InputMode, ResultRow};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESULT_HIGHLIGHT_SYMBOL: &str = "> ";
 
-pub async fn run(governor: &mut Governor) -> io::Result<Option<Value>> {
+pub async fn run(app: &mut App) -> io::Result<Option<Value>> {
     let mut terminal = TerminalSession::enter()?;
-    governor.refresh_preview();
-    terminal.draw(governor)?;
+    app.refresh_preview();
+    terminal.draw(app)?;
 
     loop {
-        let mut should_draw = governor.receive_pending_candidates() > 0;
+        let mut should_draw = app.receive_pending_candidates() > 0;
 
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {
-                Event::Key(key) => match handle_key(governor, key) {
+                Event::Key(key) => match handle_key(app, key) {
                     KeyAction::Continue => should_draw = true,
                     KeyAction::Quit(command) => return Ok(command),
                 },
@@ -39,8 +39,8 @@ pub async fn run(governor: &mut Governor) -> io::Result<Option<Value>> {
         }
 
         if should_draw {
-            governor.refresh_preview();
-            terminal.draw(governor)?;
+            app.refresh_preview();
+            terminal.draw(app)?;
         }
     }
 }
@@ -51,61 +51,61 @@ enum KeyAction {
     Quit(Option<Value>),
 }
 
-fn handle_key(governor: &mut Governor, key: KeyEvent) -> KeyAction {
+fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::Quit(None)
         }
         KeyCode::Esc => KeyAction::Quit(None),
-        KeyCode::Enter => match governor.press_enter() {
+        KeyCode::Enter => match app.press_enter() {
             Some(command) => KeyAction::Quit(Some(command)),
             None => KeyAction::Continue,
         },
         KeyCode::Tab => {
-            governor.press_tab();
+            app.press_tab();
             KeyAction::Continue
         }
         KeyCode::Up => {
-            governor.select_previous();
+            app.select_previous();
             KeyAction::Continue
         }
         KeyCode::Down => {
-            governor.select_next();
+            app.select_next();
             KeyAction::Continue
         }
         KeyCode::Char('~') => {
-            governor.press_tilde();
+            app.press_tilde();
             KeyAction::Continue
         }
         KeyCode::Backspace => {
-            update_text(governor, |text| {
+            update_text(app, |text| {
                 text.pop();
             });
             KeyAction::Continue
         }
         KeyCode::Char(ch) => {
-            update_text(governor, |text| text.push(ch));
+            update_text(app, |text| text.push(ch));
             KeyAction::Continue
         }
         _ => KeyAction::Continue,
     }
 }
 
-fn update_text(governor: &mut Governor, update: impl FnOnce(&mut String)) {
-    let mut value = governor.value();
+fn update_text(app: &mut App, update: impl FnOnce(&mut String)) {
+    let mut value = app.value();
     update(&mut value.editable_text);
-    governor.update_input(value);
+    app.update_input(value);
 }
 
-fn render(frame: &mut Frame<'_>, governor: &Governor) {
-    let input = governor.value();
-    let mode = match governor.mode() {
+fn render(frame: &mut Frame<'_>, app: &App) {
+    let input = app.value();
+    let mode = match app.mode() {
         InputMode::Search => "search",
         InputMode::Edit => "edit",
     };
-    let queue = governor.queue_status().unwrap_or_default();
-    let results = governor.results();
-    let selected_index = governor.selected_index();
+    let queue = app.queue_status().unwrap_or_default();
+    let results = app.results();
+    let selected_index = app.selected_index();
 
     let area = frame.area();
     let shell = Block::default()
@@ -113,7 +113,7 @@ fn render(frame: &mut Frame<'_>, governor: &Governor) {
         .border_style(Style::new().fg(Color::DarkGray))
         .title(Line::from(vec![
             Span::styled(" fzlaunch ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {mode} "), mode_style(governor.mode())),
+            Span::styled(format!(" {mode} "), mode_style(app.mode())),
         ]));
     let shell_area = shell.inner(area);
     frame.render_widget(shell, area);
@@ -127,14 +127,14 @@ fn render(frame: &mut Frame<'_>, governor: &Governor) {
         ])
         .split(shell_area);
 
-    render_input(frame, chunks[0], input.editable_text, governor.mode());
+    render_input(frame, chunks[0], input.editable_text, app.mode());
     render_queue(frame, chunks[1], queue);
     render_result_area(
         frame,
         chunks[2],
         results,
         selected_index,
-        governor.preview_output(),
+        app.preview_output(),
     );
 }
 
@@ -394,8 +394,8 @@ impl TerminalSession {
         Ok(Self { terminal })
     }
 
-    fn draw(&mut self, governor: &Governor) -> io::Result<()> {
-        self.terminal.draw(|frame| render(frame, governor))?;
+    fn draw(&mut self, app: &App) -> io::Result<()> {
+        self.terminal.draw(|frame| render(frame, app))?;
         Ok(())
     }
 }
@@ -462,25 +462,25 @@ mod tests {
 
     #[test]
     fn enter_with_incomplete_command_continues() {
-        let mut governor = Governor::with_sources([]);
+        let mut app = App::with_sources([]);
 
-        governor.update_input(Value::raw("readlink -f {}"));
+        app.update_input(Value::raw("readlink -f {}"));
 
         assert_eq!(
-            handle_key(&mut governor, key(KeyCode::Enter)),
+            handle_key(&mut app, key(KeyCode::Enter)),
             KeyAction::Continue
         );
-        assert_eq!(governor.queue_status(), Some("readlink -f {}".into()));
+        assert_eq!(app.queue_status(), Some("readlink -f {}".into()));
     }
 
     #[test]
     fn enter_with_complete_command_quits_with_command() {
-        let mut governor = Governor::with_sources([]);
+        let mut app = App::with_sources([]);
 
-        governor.update_input(Value::raw("nvim"));
+        app.update_input(Value::raw("nvim"));
 
         assert_eq!(
-            handle_key(&mut governor, key(KeyCode::Enter)),
+            handle_key(&mut app, key(KeyCode::Enter)),
             KeyAction::Quit(Some(Value::raw("nvim")))
         );
     }
