@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::model::{Candidate, Value};
 use crate::shell;
@@ -8,11 +9,27 @@ use crate::ui::tui;
 use tokio::sync::mpsc::error::TryRecvError;
 
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
+const PREVIEW_OUTPUT_LIMIT: usize = 64 * 1024;
 
 pub struct Governor {
     state: LauncherState,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
+    preview: PreviewState,
+}
+
+struct PreviewState {
+    command: Option<String>,
+    output: String,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            command: None,
+            output: "no preview".to_string(),
+        }
+    }
 }
 
 pub fn run() {
@@ -59,6 +76,7 @@ impl Governor {
             state: LauncherState::default(),
             candidate_receiver,
             source_tasks,
+            preview: PreviewState::default(),
         }
     }
 
@@ -122,6 +140,23 @@ impl Governor {
         self.state.selected_preview_command()
     }
 
+    pub fn refresh_preview(&mut self) {
+        let command = self.state.selected_preview_command();
+        if self.preview.command == command {
+            return;
+        }
+
+        self.preview.output = command
+            .as_deref()
+            .map(preview_command_output)
+            .unwrap_or_else(|| "no preview".to_string());
+        self.preview.command = command;
+    }
+
+    pub fn preview_output(&self) -> &str {
+        &self.preview.output
+    }
+
     pub async fn receive_candidates(&mut self) -> bool {
         let Some(candidates) = self.candidate_receiver.recv().await else {
             return false;
@@ -144,6 +179,40 @@ impl Governor {
                 Err(TryRecvError::Disconnected) => return batches,
             }
         }
+    }
+}
+
+fn preview_command_output(command: &str) -> String {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("MANPAGER", "cat")
+        .env("PAGER", "cat")
+        .env("TERM", "dumb")
+        .output();
+
+    let Ok(output) = output else {
+        return "preview failed".to_string();
+    };
+
+    let bytes = if output.stdout.is_empty() {
+        output.stderr
+    } else {
+        output.stdout
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    limit_preview_output(text.trim_end())
+}
+
+fn limit_preview_output(text: &str) -> String {
+    let mut output = text.chars().take(PREVIEW_OUTPUT_LIMIT).collect::<String>();
+    if text.chars().count() > PREVIEW_OUTPUT_LIMIT {
+        output.push_str("\n...");
+    }
+    if output.is_empty() {
+        "no preview output".to_string()
+    } else {
+        output
     }
 }
 
@@ -229,6 +298,33 @@ mod tests {
         governor
             .selected()
             .expect("governor should have selected value")
+    }
+
+    #[test]
+    fn preview_command_output_captures_stdout() {
+        assert_eq!(
+            preview_command_output("printf 'hello preview'"),
+            "hello preview"
+        );
+    }
+
+    #[test]
+    fn empty_preview_output_has_placeholder() {
+        assert_eq!(limit_preview_output(""), "no preview output");
+    }
+
+    #[test]
+    fn governor_refreshes_preview_for_selected_candidate() {
+        let mut governor = Governor::with_sources([]);
+
+        governor.feed([
+            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None)
+                .with_preview_command(Some(Value::raw("printf 'paper preview'"))),
+        ]);
+        governor.update_input(Value::raw(";fpaper"));
+        governor.refresh_preview();
+
+        assert_eq!(governor.preview_output(), "paper preview");
     }
 
     #[test]

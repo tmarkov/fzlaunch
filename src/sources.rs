@@ -55,33 +55,35 @@ impl PathExecutables {
 
         Self { dirs }
     }
+
+    fn candidate_batches(&self) -> Vec<Vec<Candidate>> {
+        let mut seen = BTreeSet::new();
+
+        self.dirs
+            .iter()
+            .filter_map(|dir| {
+                let candidates = executable_commands_in_dir(dir)
+                    .into_iter()
+                    .filter(|command| seen.insert(command.clone()))
+                    .map(executable_candidate)
+                    .collect::<Vec<_>>();
+                (!candidates.is_empty()).then_some(candidates)
+            })
+            .collect()
+    }
 }
 
 impl Source for PathExecutables {
     fn candidates(&self) -> Vec<Candidate> {
-        let mut commands = BTreeSet::new();
-
-        for dir in &self.dirs {
-            commands.extend(executable_commands_in_dir(dir));
-        }
-
-        commands.into_iter().map(executable_candidate).collect()
+        self.candidate_batches().into_iter().flatten().collect()
     }
 }
 
 impl AsyncSource for PathExecutables {
     fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
-            let mut seen = BTreeSet::new();
-
-            for dir in self.dirs {
-                let candidates = executable_commands_in_dir(&dir)
-                    .into_iter()
-                    .filter(|command| seen.insert(command.clone()))
-                    .map(executable_candidate)
-                    .collect::<Vec<_>>();
-
-                if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
+            for candidates in self.candidate_batches() {
+                if sender.blocking_send(candidates).is_err() {
                     break;
                 }
             }
@@ -89,30 +91,36 @@ impl AsyncSource for PathExecutables {
     }
 }
 
-impl Source for FilesystemRoot {
-    fn candidates(&self) -> Vec<Candidate> {
-        let mut paths = BTreeSet::new();
+impl FilesystemRoot {
+    fn candidate_batches(&self) -> Vec<Vec<Candidate>> {
         let mut pending = vec![self.root.clone()];
+        let mut batches = Vec::new();
 
         while let Some(dir) = pending.pop() {
-            paths.extend(filesystem_paths_in_dir(dir, &mut pending));
+            let candidates = filesystem_paths_in_dir(dir, &mut pending)
+                .into_iter()
+                .map(filesystem_candidate)
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() {
+                batches.push(candidates);
+            }
         }
 
-        paths.into_iter().map(filesystem_candidate).collect()
+        batches
+    }
+}
+
+impl Source for FilesystemRoot {
+    fn candidates(&self) -> Vec<Candidate> {
+        self.candidate_batches().into_iter().flatten().collect()
     }
 }
 
 impl AsyncSource for FilesystemRoot {
     fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
-            let mut pending = vec![self.root];
-
-            while let Some(dir) = pending.pop() {
-                let candidates = filesystem_paths_in_dir(dir, &mut pending)
-                    .into_iter()
-                    .map(filesystem_candidate)
-                    .collect::<Vec<_>>();
-                if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
+            for candidates in self.candidate_batches() {
+                if sender.blocking_send(candidates).is_err() {
                     break;
                 }
             }

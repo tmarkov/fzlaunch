@@ -19,9 +19,15 @@ pub struct LauncherState {
     mode: InputMode,
     value: Value,
     candidates: Vec<Candidate>,
-    results: Vec<Candidate>,
+    results: Vec<RankedCandidate>,
     selected_index: Option<usize>,
     queue: Queue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RankedCandidate {
+    candidate: Candidate,
+    row: ResultRow,
 }
 
 struct IndexedHaystack {
@@ -82,30 +88,50 @@ impl LauncherState {
     }
 
     fn rerank(&mut self) {
+        let haystacks = self
+            .candidates
+            .iter()
+            .map(candidate_haystack)
+            .collect::<Vec<_>>();
+
         if self.value.editable_text.is_empty() {
-            self.results = self.candidates.clone();
-        } else {
-            let haystacks = self
+            self.results = self
                 .candidates
                 .iter()
-                .map(candidate_haystack)
-                .collect::<Vec<_>>();
-
+                .cloned()
+                .zip(haystacks)
+                .map(|(candidate, haystack)| RankedCandidate {
+                    candidate,
+                    row: ResultRow {
+                        haystack,
+                        match_indices: Vec::new(),
+                    },
+                })
+                .collect();
+        } else {
             let indexed_haystacks = haystacks
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(index, haystack)| IndexedHaystack { index, haystack });
             let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-
-            self.results = Pattern::parse(
+            let pattern = Pattern::parse(
                 &self.value.editable_text,
                 CaseMatching::Ignore,
                 Normalization::Smart,
-            )
-            .match_list(indexed_haystacks, &mut matcher)
-            .into_iter()
-            .map(|(matched, _)| self.candidates[matched.index].clone())
-            .collect();
+            );
+
+            self.results = pattern
+                .match_list(indexed_haystacks, &mut matcher)
+                .into_iter()
+                .map(|(matched, _)| RankedCandidate {
+                    candidate: self.candidates[matched.index].clone(),
+                    row: ResultRow {
+                        match_indices: match_indices(&pattern, &matched.haystack, &mut matcher),
+                        haystack: matched.haystack,
+                    },
+                })
+                .collect();
         }
 
         self.selected_index = (!self.results.is_empty()).then_some(0);
@@ -163,7 +189,7 @@ impl LauncherState {
             if let Some(direct_action) = self
                 .selected_index
                 .and_then(|index| self.results.get(index))
-                .and_then(|candidate| candidate.direct_action().cloned())
+                .and_then(|result| result.candidate.direct_action().cloned())
             {
                 self.queue.compose(direct_action);
             }
@@ -212,51 +238,13 @@ impl LauncherState {
     pub fn selected(&self) -> Option<Value> {
         self.selected_index
             .and_then(|index| self.results.get(index))
-            .map(|candidate| candidate.value().clone())
+            .map(|result| result.candidate.value().clone())
     }
 
     pub fn results(&self) -> Vec<ResultRow> {
-        let haystacks = self
-            .results
+        self.results
             .iter()
-            .map(candidate_haystack)
-            .collect::<Vec<_>>();
-        if self.value.editable_text.is_empty() {
-            return haystacks
-                .into_iter()
-                .map(|haystack| ResultRow {
-                    haystack,
-                    match_indices: Vec::new(),
-                })
-                .collect();
-        }
-
-        let pattern = Pattern::parse(
-            &self.value.editable_text,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-        );
-        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-        let mut buf = Vec::new();
-        let mut indices = Vec::new();
-
-        haystacks
-            .into_iter()
-            .map(|haystack| {
-                indices.clear();
-                let _ = pattern.indices(
-                    Utf32Str::new(&haystack, &mut buf),
-                    &mut matcher,
-                    &mut indices,
-                );
-                indices.sort_unstable();
-                indices.dedup();
-
-                ResultRow {
-                    haystack,
-                    match_indices: indices.iter().map(|index| *index as usize).collect(),
-                }
-            })
+            .map(|result| result.row.clone())
             .collect()
     }
 
@@ -265,11 +253,11 @@ impl LauncherState {
     }
 
     pub fn selected_preview_command(&self) -> Option<String> {
-        let candidate = self
+        let result = self
             .selected_index
             .and_then(|index| self.results.get(index))?;
-        let preview_command = candidate.preview_command()?.clone();
-        let mut queue = Queue::from_values([candidate.value().clone()]);
+        let preview_command = result.candidate.preview_command()?.clone();
+        let mut queue = Queue::from_values([result.candidate.value().clone()]);
         queue.compose(preview_command);
         queue.status()
     }
@@ -287,6 +275,16 @@ fn candidate_haystack(candidate: &Candidate) -> String {
         candidate.selector(),
         candidate.value().editable_text
     )
+}
+
+fn match_indices(pattern: &Pattern, haystack: &str, matcher: &mut Matcher) -> Vec<usize> {
+    let mut buf = Vec::new();
+    let mut indices = Vec::new();
+
+    let _ = pattern.indices(Utf32Str::new(haystack, &mut buf), matcher, &mut indices);
+    indices.sort_unstable();
+    indices.dedup();
+    indices.into_iter().map(|index| index as usize).collect()
 }
 
 #[cfg(test)]
