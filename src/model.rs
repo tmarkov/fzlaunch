@@ -17,6 +17,7 @@ pub struct Candidate {
     value: Value,
     selector: char,
     direct_action: Option<Value>,
+    preview_command: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -141,7 +142,13 @@ impl Candidate {
             value,
             selector,
             direct_action,
+            preview_command: None,
         }
+    }
+
+    pub fn with_preview_command(mut self, preview_command: Option<Value>) -> Self {
+        self.preview_command = preview_command;
+        self
     }
 
     pub(crate) fn value(&self) -> &Value {
@@ -154,6 +161,10 @@ impl Candidate {
 
     pub(crate) fn selector(&self) -> char {
         self.selector
+    }
+
+    pub(crate) fn preview_command(&self) -> Option<&Value> {
+        self.preview_command.as_ref()
     }
 }
 

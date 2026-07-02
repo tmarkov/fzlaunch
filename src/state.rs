@@ -264,6 +264,16 @@ impl LauncherState {
         self.selected_index
     }
 
+    pub fn selected_preview_command(&self) -> Option<String> {
+        let candidate = self
+            .selected_index
+            .and_then(|index| self.results.get(index))?;
+        let preview_command = candidate.preview_command()?.clone();
+        let mut queue = Queue::from_values([candidate.value().clone()]);
+        queue.compose(preview_command);
+        queue.status()
+    }
+
     fn reset_input(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
@@ -427,6 +437,31 @@ mod tests {
                 match_indices: vec![12, 13, 14, 15, 16],
             }]
         );
+    }
+
+    #[test]
+    fn selected_preview_command_fills_selected_value() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/paper with spaces.pdf"), 'f', None)
+                .with_preview_command(Some(Value::raw("cat {}"))),
+        ]);
+        state.update_input(Value::raw("paper"));
+
+        assert_eq!(
+            state.selected_preview_command(),
+            Some("cat '/home/me/paper with spaces.pdf'".to_string())
+        );
+    }
+
+    #[test]
+    fn selected_preview_command_returns_none_without_preview() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
+
+        assert_eq!(state.selected_preview_command(), None);
     }
 
     #[test]

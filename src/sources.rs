@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -119,7 +120,17 @@ impl AsyncSource for FilesystemRoot {
     }
 }
 
-fn filesystem_paths_in_dir(dir: PathBuf, pending: &mut Vec<PathBuf>) -> BTreeSet<(String, char)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FilesystemEntryKind {
+    Directory,
+    TextFile,
+    BinaryFile,
+}
+
+fn filesystem_paths_in_dir(
+    dir: PathBuf,
+    pending: &mut Vec<PathBuf>,
+) -> BTreeSet<(String, FilesystemEntryKind)> {
     let mut paths = BTreeSet::new();
     let Ok(entries) = fs::read_dir(dir) else {
         return paths;
@@ -130,23 +141,41 @@ fn filesystem_paths_in_dir(dir: PathBuf, pending: &mut Vec<PathBuf>) -> BTreeSet
             continue;
         };
 
-        let match_char = if metadata.is_file() {
-            'f'
+        let path = entry.path();
+        let Some(path_text) = path.to_str().map(str::to_owned) else {
+            continue;
+        };
+
+        let kind = if metadata.is_file() {
+            if is_text_file(&path) {
+                FilesystemEntryKind::TextFile
+            } else {
+                FilesystemEntryKind::BinaryFile
+            }
         } else if metadata.is_dir() {
-            pending.push(entry.path());
-            'd'
+            pending.push(path);
+            FilesystemEntryKind::Directory
         } else {
             continue;
         };
 
-        let Some(path) = entry.path().to_str().map(str::to_owned) else {
-            continue;
-        };
-
-        paths.insert((path, match_char));
+        paths.insert((path_text, kind));
     }
 
     paths
+}
+
+fn is_text_file(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buffer = [0; 1024];
+    let Ok(bytes_read) = file.read(&mut buffer) else {
+        return false;
+    };
+    let bytes = &buffer[..bytes_read];
+
+    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
 
 fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
@@ -176,21 +205,29 @@ fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
 
 fn executable_candidate(command: String) -> Candidate {
     Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}")))
+        .with_preview_command(Some(Value::raw("man {}")))
 }
 
-fn filesystem_candidate((path, match_char): (String, char)) -> Candidate {
+fn filesystem_candidate(entry: (String, FilesystemEntryKind)) -> Candidate {
+    let (path, match_char, preview_command) = match entry {
+        (path, FilesystemEntryKind::Directory) => (path, 'd', Some(Value::raw("ls {}"))),
+        (path, FilesystemEntryKind::TextFile) => (path, 'f', Some(Value::raw("cat {}"))),
+        (path, FilesystemEntryKind::BinaryFile) => (path, 'f', None),
+    };
+
     Candidate::new(
         Value::escaped(path),
         match_char,
         Some(Value::raw("xdg-open {}")),
     )
+    .with_preview_command(preview_command)
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::model::{Candidate, Value};
@@ -229,6 +266,37 @@ mod tests {
         fn candidates(&self) -> Vec<Candidate> {
             self.candidates.clone()
         }
+    }
+
+    fn expected_executable(command: &str) -> Candidate {
+        Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}")))
+            .with_preview_command(Some(Value::raw("man {}")))
+    }
+
+    fn expected_directory(path: &Path) -> Candidate {
+        Candidate::new(
+            Value::escaped(path.to_str().expect("path should be utf-8")),
+            'd',
+            Some(Value::raw("xdg-open {}")),
+        )
+        .with_preview_command(Some(Value::raw("ls {}")))
+    }
+
+    fn expected_text_file(path: &Path) -> Candidate {
+        Candidate::new(
+            Value::escaped(path.to_str().expect("path should be utf-8")),
+            'f',
+            Some(Value::raw("xdg-open {}")),
+        )
+        .with_preview_command(Some(Value::raw("cat {}")))
+    }
+
+    fn expected_binary_file(path: &Path) -> Candidate {
+        Candidate::new(
+            Value::escaped(path.to_str().expect("path should be utf-8")),
+            'f',
+            Some(Value::raw("xdg-open {}")),
+        )
     }
 
     #[test]
@@ -272,11 +340,7 @@ mod tests {
 
         assert_eq!(
             candidates,
-            vec![Candidate::new(
-                Value::raw("fzlaunch-test-command"),
-                'c',
-                Some(Value::raw("{}"))
-            )]
+            vec![expected_executable("fzlaunch-test-command")]
         );
     }
 
@@ -299,14 +363,7 @@ mod tests {
 
         let candidates = super::executables_from_path(&path_string(&[first, second]));
 
-        assert_eq!(
-            candidates,
-            vec![Candidate::new(
-                Value::raw("shared-command"),
-                'c',
-                Some(Value::raw("{}"))
-            )]
-        );
+        assert_eq!(candidates, vec![expected_executable("shared-command")]);
     }
 
     #[test]
@@ -317,14 +374,7 @@ mod tests {
 
         let candidates = super::executables_from_path(&path_string(&[missing, bin]));
 
-        assert_eq!(
-            candidates,
-            vec![Candidate::new(
-                Value::raw("existing-command"),
-                'c',
-                Some(Value::raw("{}"))
-            )]
-        );
+        assert_eq!(candidates, vec![expected_executable("existing-command")]);
     }
 
     #[test]
@@ -338,8 +388,8 @@ mod tests {
         assert_eq!(
             candidates,
             vec![
-                Candidate::new(Value::raw("a-command"), 'c', Some(Value::raw("{}"))),
-                Candidate::new(Value::raw("z-command"), 'c', Some(Value::raw("{}"))),
+                expected_executable("a-command"),
+                expected_executable("z-command"),
             ]
         );
     }
@@ -365,22 +415,8 @@ mod tests {
             .await
             .expect("path source should emit second dir batch");
 
-        assert_eq!(
-            first_batch,
-            vec![Candidate::new(
-                Value::raw("first-command"),
-                'c',
-                Some(Value::raw("{}"))
-            )]
-        );
-        assert_eq!(
-            second_batch,
-            vec![Candidate::new(
-                Value::raw("second-command"),
-                'c',
-                Some(Value::raw("{}"))
-            )]
-        );
+        assert_eq!(first_batch, vec![expected_executable("first-command")]);
+        assert_eq!(second_batch, vec![expected_executable("second-command")]);
 
         task.await.expect("path source task should finish");
     }
@@ -445,14 +481,18 @@ mod tests {
 
         let candidates = super::filesystem_entries(&root);
 
-        assert_eq!(
-            candidates,
-            vec![Candidate::new(
-                Value::escaped(file.to_str().expect("path should be utf-8")),
-                'f',
-                Some(Value::raw("xdg-open {}"))
-            )]
-        );
+        assert_eq!(candidates, vec![expected_text_file(&file)]);
+    }
+
+    #[test]
+    fn filesystem_source_does_not_preview_binary_files() {
+        let root = temp_source_dir("filesystem-source-binary-file");
+        let file = root.join("binary-file");
+        fs::write(&file, b"\0binary").expect("test binary file should be written");
+
+        let candidates = super::filesystem_entries(&root);
+
+        assert_eq!(candidates, vec![expected_binary_file(&file)]);
     }
 
     #[tokio::test]
@@ -474,32 +514,14 @@ mod tests {
 
         assert_eq!(
             first_batch,
-            vec![
-                Candidate::new(
-                    Value::escaped(first.to_str().expect("path should be utf-8")),
-                    'f',
-                    Some(Value::raw("xdg-open {}"))
-                ),
-                Candidate::new(
-                    Value::escaped(nested.to_str().expect("path should be utf-8")),
-                    'd',
-                    Some(Value::raw("xdg-open {}"))
-                ),
-            ]
+            vec![expected_text_file(&first), expected_directory(&nested)]
         );
 
         let remaining = receiver
             .recv()
             .await
             .expect("filesystem source should emit nested batch");
-        assert_eq!(
-            remaining,
-            vec![Candidate::new(
-                Value::escaped(second.to_str().expect("path should be utf-8")),
-                'f',
-                Some(Value::raw("xdg-open {}"))
-            )]
-        );
+        assert_eq!(remaining, vec![expected_text_file(&second)]);
 
         task.await.expect("filesystem source task should finish");
     }
@@ -512,14 +534,7 @@ mod tests {
 
         let candidates = super::filesystem_entries(&root);
 
-        assert_eq!(
-            candidates,
-            vec![Candidate::new(
-                Value::escaped(dir.to_str().expect("path should be utf-8")),
-                'd',
-                Some(Value::raw("xdg-open {}"))
-            )]
-        );
+        assert_eq!(candidates, vec![expected_directory(&dir)]);
     }
 
     #[test]
@@ -534,18 +549,7 @@ mod tests {
 
         assert_eq!(
             candidates,
-            vec![
-                Candidate::new(
-                    Value::escaped(dir.to_str().expect("path should be utf-8")),
-                    'd',
-                    Some(Value::raw("xdg-open {}"))
-                ),
-                Candidate::new(
-                    Value::escaped(file.to_str().expect("path should be utf-8")),
-                    'f',
-                    Some(Value::raw("xdg-open {}"))
-                ),
-            ]
+            vec![expected_directory(&dir), expected_text_file(&file)]
         );
     }
 
@@ -606,16 +610,8 @@ mod tests {
 
         let candidates = super::filesystem_entries(&root);
 
-        assert!(candidates.contains(&Candidate::new(
-            Value::escaped(nested.to_str().expect("path should be utf-8")),
-            'd',
-            Some(Value::raw("xdg-open {}"))
-        )));
-        assert!(candidates.contains(&Candidate::new(
-            Value::escaped(file.to_str().expect("path should be utf-8")),
-            'f',
-            Some(Value::raw("xdg-open {}"))
-        )));
+        assert!(candidates.contains(&expected_directory(&nested)));
+        assert!(candidates.contains(&expected_text_file(&file)));
     }
 
     #[test]
@@ -628,10 +624,6 @@ mod tests {
 
         let candidates = super::filesystem_entries(&root);
 
-        assert!(candidates.contains(&Candidate::new(
-            Value::escaped(file.to_str().expect("path should be utf-8")),
-            'f',
-            Some(Value::raw("xdg-open {}"))
-        )));
+        assert!(candidates.contains(&expected_text_file(&file)));
     }
 }

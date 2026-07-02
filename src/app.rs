@@ -118,6 +118,10 @@ impl Governor {
         self.state.selected_index()
     }
 
+    pub fn selected_preview_command(&self) -> Option<String> {
+        self.state.selected_preview_command()
+    }
+
     pub async fn receive_candidates(&mut self) -> bool {
         let Some(candidates) = self.candidate_receiver.recv().await else {
             return false;

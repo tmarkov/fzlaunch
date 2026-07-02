@@ -1,4 +1,5 @@
 use std::io;
+use std::process::Command;
 use std::time::Duration;
 
 use crossterm::cursor;
@@ -18,10 +19,12 @@ use crate::state::{InputMode, ResultRow};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESULT_HIGHLIGHT_SYMBOL: &str = "> ";
+const PREVIEW_OUTPUT_LIMIT: usize = 64 * 1024;
 
 pub async fn run(governor: &mut Governor) -> io::Result<Option<Value>> {
     let mut terminal = TerminalSession::enter()?;
-    terminal.draw(governor)?;
+    let mut preview = PreviewState::default();
+    terminal.draw(governor, &mut preview)?;
 
     loop {
         let mut should_draw = governor.receive_pending_candidates() > 0;
@@ -38,7 +41,7 @@ pub async fn run(governor: &mut Governor) -> io::Result<Option<Value>> {
         }
 
         if should_draw {
-            terminal.draw(governor)?;
+            terminal.draw(governor, &mut preview)?;
         }
     }
 }
@@ -95,7 +98,7 @@ fn update_text(governor: &mut Governor, update: impl FnOnce(&mut String)) {
     governor.update_input(value);
 }
 
-fn render(frame: &mut Frame<'_>, governor: &Governor) {
+fn render(frame: &mut Frame<'_>, governor: &Governor, preview: &PreviewState) {
     let input = governor.value();
     let mode = match governor.mode() {
         InputMode::Search => "search",
@@ -127,7 +130,7 @@ fn render(frame: &mut Frame<'_>, governor: &Governor) {
 
     render_input(frame, chunks[0], input.editable_text, governor.mode());
     render_queue(frame, chunks[1], queue);
-    render_results(frame, chunks[2], results, selected_index);
+    render_result_area(frame, chunks[2], results, selected_index, &preview.output);
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: String, mode: InputMode) {
@@ -166,6 +169,22 @@ fn render_queue(frame: &mut Frame<'_>, area: Rect, text: String) {
     );
 }
 
+fn render_result_area(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    results: Vec<ResultRow>,
+    selected_index: Option<usize>,
+    preview_output: &str,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+        .split(area);
+
+    render_results(frame, chunks[0], results, selected_index);
+    render_preview(frame, chunks[1], preview_output);
+}
+
 fn render_results(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -202,6 +221,26 @@ fn render_results(
     let mut state = ListState::default();
     state.select(selected_visible);
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_preview(frame: &mut Frame<'_>, area: Rect, preview_output: &str) {
+    let style = if preview_output == "no preview" {
+        Style::new().fg(Color::DarkGray)
+    } else {
+        Style::new()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(Span::styled(" preview ", Style::new().fg(Color::Gray)));
+
+    frame.render_widget(
+        Paragraph::new(preview_output.to_string())
+            .style(style)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn result_line(row: ResultRow, max_width: usize) -> Line<'static> {
@@ -321,6 +360,68 @@ fn truncate_middle(text: &str, max_width: usize) -> Vec<DisplayChar> {
     prefix.chain(ellipsis).chain(suffix).collect()
 }
 
+struct PreviewState {
+    command: Option<String>,
+    output: String,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            command: None,
+            output: "no preview".to_string(),
+        }
+    }
+}
+
+impl PreviewState {
+    fn update(&mut self, command: Option<String>) {
+        if self.command == command {
+            return;
+        }
+
+        self.output = command
+            .as_deref()
+            .map(preview_command_output)
+            .unwrap_or_else(|| "no preview".to_string());
+        self.command = command;
+    }
+}
+
+fn preview_command_output(command: &str) -> String {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("MANPAGER", "cat")
+        .env("PAGER", "cat")
+        .env("TERM", "dumb")
+        .output();
+
+    let Ok(output) = output else {
+        return "preview failed".to_string();
+    };
+
+    let bytes = if output.stdout.is_empty() {
+        output.stderr
+    } else {
+        output.stdout
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    limit_preview_output(text.trim_end())
+}
+
+fn limit_preview_output(text: &str) -> String {
+    let mut output = text.chars().take(PREVIEW_OUTPUT_LIMIT).collect::<String>();
+    if text.chars().count() > PREVIEW_OUTPUT_LIMIT {
+        output.push_str("\n...");
+    }
+    if output.is_empty() {
+        "no preview output".to_string()
+    } else {
+        output
+    }
+}
+
 fn mode_style(mode: InputMode) -> Style {
     match mode {
         InputMode::Search => Style::new().fg(Color::Cyan),
@@ -350,8 +451,10 @@ impl TerminalSession {
         Ok(Self { terminal })
     }
 
-    fn draw(&mut self, governor: &Governor) -> io::Result<()> {
-        self.terminal.draw(|frame| render(frame, governor))?;
+    fn draw(&mut self, governor: &Governor, preview: &mut PreviewState) -> io::Result<()> {
+        preview.update(governor.selected_preview_command());
+        self.terminal
+            .draw(|frame| render(frame, governor, preview))?;
         Ok(())
     }
 }
@@ -414,6 +517,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(highlighted, vec!["paper"]);
+    }
+
+    #[test]
+    fn preview_command_output_captures_stdout() {
+        assert_eq!(
+            preview_command_output("printf 'hello preview'"),
+            "hello preview"
+        );
+    }
+
+    #[test]
+    fn empty_preview_output_has_placeholder() {
+        assert_eq!(limit_preview_output(""), "no preview output");
     }
 
     #[test]
