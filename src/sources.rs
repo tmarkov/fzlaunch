@@ -148,11 +148,7 @@ fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
     };
 
     for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        if !is_executable_file(&entry.path()) {
             continue;
         }
 
@@ -164,6 +160,14 @@ fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
     }
 
     commands
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
 fn executable_candidate(command: String) -> Candidate {
@@ -320,6 +324,22 @@ mod tests {
             candidates,
             vec![expected_executable("fzlaunch-test-command")]
         );
+    }
+
+    #[tokio::test]
+    async fn path_source_returns_symlinked_executables() {
+        let target_dir = temp_source_dir("path-source-symlink-target");
+        let bin = temp_source_dir("path-source-symlink-bin");
+        let target = target_dir.join("fzlaunch-test-command");
+        write_file(target.clone(), 0o755);
+        symlink(target, bin.join("fzlaunch-test-link")).expect("test symlink should be created");
+
+        let candidates = collect_source(Box::new(super::PathExecutables::from_path(
+            bin.to_str().expect("path should be utf-8"),
+        )))
+        .await;
+
+        assert_eq!(candidates, vec![expected_executable("fzlaunch-test-link")]);
     }
 
     #[tokio::test]
