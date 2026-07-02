@@ -1,8 +1,11 @@
 mod app;
 mod model;
+mod preview;
 mod shell;
 mod sources;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod ui;
 
 fn main() {

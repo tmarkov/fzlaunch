@@ -1,50 +1,23 @@
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::process::Stdio;
-use std::time::Duration;
 
-#[cfg(test)]
-use crate::model::Candidate;
 use crate::model::Value;
+use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
 use crate::state::LauncherState;
 use crate::ui::tui;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 use tokio::sync::mpsc::error::TryRecvError;
 
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
-const PREVIEW_OUTPUT_LIMIT: usize = 64 * 1024;
-const PREVIEW_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct App {
     state: LauncherState,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
-    preview: PreviewState,
-    preview_sender: tokio::sync::mpsc::Sender<PreviewOutput>,
+    preview_command: Option<String>,
+    preview: Preview,
     preview_receiver: tokio::sync::mpsc::Receiver<PreviewOutput>,
-    preview_task: Option<tokio::task::JoinHandle<()>>,
-}
-
-struct PreviewState {
-    command: Option<String>,
-    output: String,
-}
-
-struct PreviewOutput {
-    command: String,
-    output: String,
-}
-
-impl Default for PreviewState {
-    fn default() -> Self {
-        Self {
-            command: None,
-            output: "no preview".to_string(),
-        }
-    }
+    preview_runner: PreviewRunner,
 }
 
 pub fn run() {
@@ -87,25 +60,21 @@ impl App {
             .collect();
 
         drop(sender);
+        let preview_runner = PreviewRunner::new(preview_sender);
 
         Self {
             state: LauncherState::default(),
             candidate_receiver,
             source_tasks,
-            preview: PreviewState::default(),
-            preview_sender,
+            preview_command: None,
+            preview: Preview::Unavailable,
             preview_receiver,
-            preview_task: None,
+            preview_runner,
         }
     }
 
     pub fn update_input(&mut self, value: Value) {
         self.state.update_input(value);
-    }
-
-    #[cfg(test)]
-    pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
-        self.state.feed(candidates);
     }
 
     pub fn select_next(&mut self) {
@@ -134,30 +103,23 @@ impl App {
 
     pub fn refresh_preview(&mut self) {
         let command = self.state.selected_preview_command();
-        if self.preview.command == command {
+        if self.preview_command == command {
             return;
         }
 
-        if let Some(task) = self.preview_task.take() {
-            task.abort();
-        }
-
-        self.preview.command = command.clone();
+        self.preview_command = command.clone();
         let Some(command) = command else {
-            self.preview.output = "no preview".to_string();
+            self.preview_runner.abort();
+            self.preview = Preview::Unavailable;
             return;
         };
 
-        self.preview.output = "loading preview".to_string();
-        let sender = self.preview_sender.clone();
-        self.preview_task = Some(tokio::spawn(async move {
-            let output = preview_command_output(command.clone()).await;
-            let _ = sender.send(PreviewOutput { command, output }).await;
-        }));
+        self.preview = Preview::Loading;
+        self.preview_runner.start(command);
     }
 
-    pub fn preview_output(&self) -> &str {
-        &self.preview.output
+    pub fn preview(&self) -> &Preview {
+        &self.preview
     }
 
     #[cfg(test)]
@@ -207,93 +169,12 @@ impl App {
     }
 
     fn apply_preview(&mut self, preview: PreviewOutput) -> bool {
-        if self.preview.command.as_deref() != Some(preview.command.as_str()) {
+        if self.preview_command.as_deref() != Some(preview.command.as_str()) {
             return false;
         }
 
-        self.preview.output = preview.output;
+        self.preview = preview.preview;
         true
-    }
-}
-
-async fn preview_command_output(command: String) -> String {
-    let output = tokio::time::timeout(PREVIEW_TIMEOUT, preview_command_output_inner(command)).await;
-
-    match output {
-        Ok(output) => output,
-        Err(_) => "preview timed out".to_string(),
-    }
-}
-
-async fn preview_command_output_inner(command: String) -> String {
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .env("MANPAGER", "cat")
-        .env("PAGER", "cat")
-        .env("TERM", "dumb")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return "preview failed".to_string(),
-    };
-
-    let Some(stdout) = child.stdout.take() else {
-        return "preview failed".to_string();
-    };
-    let Some(stderr) = child.stderr.take() else {
-        return "preview failed".to_string();
-    };
-
-    let stdout = read_limited(Box::pin(stdout));
-    let stderr = read_limited(Box::pin(stderr));
-    let status = child.wait();
-    let (stdout, stderr, status) = tokio::join!(stdout, stderr, status);
-
-    if status.is_err() {
-        return "preview failed".to_string();
-    }
-
-    let stdout = stdout.unwrap_or_default();
-    let stderr = stderr.unwrap_or_default();
-    let bytes = if stdout.is_empty() { stderr } else { stdout };
-    let truncated = bytes.len() > PREVIEW_OUTPUT_LIMIT;
-    let bytes = &bytes[..bytes.len().min(PREVIEW_OUTPUT_LIMIT)];
-    let text = String::from_utf8_lossy(bytes);
-    limit_preview_output(text.trim_end(), truncated)
-}
-
-async fn read_limited(mut reader: Pin<Box<dyn AsyncRead + Send>>) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut buffer = [0; 8192];
-
-    loop {
-        let bytes_read = reader.read(&mut buffer).await?;
-        if bytes_read == 0 {
-            return Ok(output);
-        }
-
-        let remaining = PREVIEW_OUTPUT_LIMIT + 1 - output.len();
-        output.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
-
-        if output.len() > PREVIEW_OUTPUT_LIMIT {
-            return Ok(output);
-        }
-    }
-}
-
-fn limit_preview_output(text: &str, truncated: bool) -> String {
-    let mut output = text.to_string();
-    if truncated {
-        output.push_str("\n...");
-    }
-    if output.is_empty() {
-        "no preview output".to_string()
-    } else {
-        output
     }
 }
 
@@ -302,28 +183,23 @@ impl Drop for App {
         for task in &self.source_tasks {
             task.abort();
         }
-        if let Some(task) = &self.preview_task {
-            task.abort();
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
     use std::fs;
-    use std::ops::Deref;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
     use std::time::Duration;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use tokio::task::JoinHandle;
     use tokio::time;
 
     use super::*;
+    use crate::model::Candidate;
     use crate::sources::CandidateSender;
     use crate::state::InputMode;
+    use crate::test_support::{path_string, TempDir};
 
     struct MockSource {
         interval: Duration,
@@ -354,67 +230,33 @@ mod tests {
         }
     }
 
+    struct StaticSource {
+        candidates: Vec<Candidate>,
+    }
+
+    impl StaticSource {
+        fn new(candidates: impl IntoIterator<Item = Candidate>) -> Self {
+            Self {
+                candidates: candidates.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AsyncSource for StaticSource {
+        fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                let _ = sender.send(self.candidates).await;
+            })
+        }
+    }
+
     async fn receive_next_candidate(app: &mut App) {
         time::advance(Duration::from_millis(100)).await;
         assert!(app.receive_candidates().await);
     }
 
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("fzlaunch-{name}-{unique}"));
-            fs::create_dir(&path).expect("temp app dir should be created");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl AsRef<OsStr> for TempDir {
-        fn as_ref(&self) -> &OsStr {
-            self.path.as_os_str()
-        }
-    }
-
-    impl AsRef<Path> for TempDir {
-        fn as_ref(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Deref for TempDir {
-        type Target = Path;
-
-        fn deref(&self) -> &Self::Target {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-
     fn temp_app_dir(name: &str) -> TempDir {
         TempDir::new(name)
-    }
-
-    fn path_string(dirs: impl IntoIterator<Item = impl AsRef<OsStr>>) -> String {
-        std::env::join_paths(dirs)
-            .expect("test paths should join")
-            .to_str()
-            .expect("test path should be utf-8")
-            .to_string()
     }
 
     async fn receive_until_selected(app: &mut App) -> Value {
@@ -428,42 +270,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_command_output_captures_stdout() {
-        assert_eq!(
-            preview_command_output("printf 'hello preview'".to_string()).await,
-            "hello preview"
-        );
-    }
-
-    #[test]
-    fn empty_preview_output_has_placeholder() {
-        assert_eq!(limit_preview_output("", false), "no preview output");
-    }
-
-    #[tokio::test]
     async fn app_refreshes_preview_for_selected_candidate() {
-        let mut app = App::with_sources([]);
+        let mut app = App::with_sources([Box::new(StaticSource::new([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )
+        .with_preview_command(Some(Value::raw("printf 'paper preview'")))]))
+            as Box<dyn AsyncSource>]);
 
-        app.feed([
-            Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None)
-                .with_preview_command(Some(Value::raw("printf 'paper preview'"))),
-        ]);
+        assert!(app.receive_candidates().await);
         app.update_input(Value::raw(";fpaper"));
         app.refresh_preview();
 
-        assert_eq!(app.preview_output(), "loading preview");
+        assert_eq!(app.preview(), &Preview::Loading);
         assert!(app.receive_preview().await);
-        assert_eq!(app.preview_output(), "paper preview");
+        assert_eq!(app.preview(), &Preview::Ready("paper preview".into()));
     }
 
-    #[test]
-    fn app_forwards_launcher_state_operations() {
-        let mut app = App::with_sources([]);
-
-        app.feed([
+    #[tokio::test]
+    async fn app_forwards_launcher_state_operations() {
+        let mut app = App::with_sources([Box::new(StaticSource::new([
             Candidate::new(Value::escaped("/home/me/paper.pdf"), 'f', None),
             Candidate::new(Value::raw("nvim"), 'c', None),
-        ]);
+        ])) as Box<dyn AsyncSource>]);
+
+        assert!(app.receive_candidates().await);
         app.update_input(Value::raw(";fpaper"));
 
         assert_eq!(

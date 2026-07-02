@@ -188,63 +188,15 @@ fn filesystem_candidate(entry: (String, FilesystemEntryKind)) -> Candidate {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
     use std::fs;
-    use std::ops::Deref;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::model::{Candidate, Value};
     use crate::sources::{AsyncSource, CandidateSender};
     use crate::state::LauncherState;
+    use crate::test_support::{path_string, TempDir};
     use tokio::task::JoinHandle;
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("fzlaunch-{name}-{unique}"));
-            fs::create_dir(&path).expect("temp source dir should be created");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl AsRef<OsStr> for TempDir {
-        fn as_ref(&self) -> &OsStr {
-            self.path.as_os_str()
-        }
-    }
-
-    impl AsRef<Path> for TempDir {
-        fn as_ref(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Deref for TempDir {
-        type Target = Path;
-
-        fn deref(&self) -> &Self::Target {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn temp_source_dir(name: &str) -> TempDir {
         TempDir::new(name)
@@ -254,14 +206,6 @@ mod tests {
         fs::write(&path, b"#!/bin/sh\n").expect("test executable should be written");
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))
             .expect("test executable permissions should be set");
-    }
-
-    fn path_string(dirs: impl IntoIterator<Item = impl AsRef<OsStr>>) -> String {
-        std::env::join_paths(dirs)
-            .expect("test paths should join")
-            .to_str()
-            .expect("test path should be utf-8")
-            .to_string()
     }
 
     struct StaticSource {

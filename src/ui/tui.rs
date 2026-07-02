@@ -14,6 +14,7 @@ use ratatui::{Frame, Terminal};
 
 use crate::app::App;
 use crate::model::Value;
+use crate::preview::Preview;
 use crate::state::{InputMode, ResultRow};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
@@ -136,13 +137,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         state.mode(),
     );
     render_queue(frame, chunks[1], queue);
-    render_result_area(
-        frame,
-        chunks[2],
-        results,
-        selected_index,
-        app.preview_output(),
-    );
+    render_result_area(frame, chunks[2], results, selected_index, app.preview());
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: String, mode: InputMode) {
@@ -186,7 +181,7 @@ fn render_result_area(
     area: Rect,
     results: Vec<ResultRow>,
     selected_index: Option<usize>,
-    preview_output: &str,
+    preview: &Preview,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -194,7 +189,7 @@ fn render_result_area(
         .split(area);
 
     render_results(frame, chunks[0], results, selected_index);
-    render_preview(frame, chunks[1], preview_output);
+    render_preview(frame, chunks[1], preview);
 }
 
 fn render_results(
@@ -235,11 +230,11 @@ fn render_results(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_preview(frame: &mut Frame<'_>, area: Rect, preview_output: &str) {
-    let style = if preview_output == "no preview" {
-        Style::new().fg(Color::DarkGray)
-    } else {
-        Style::new()
+fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
+    let (text, style) = match preview {
+        Preview::Unavailable => ("no preview", Style::new().fg(Color::DarkGray)),
+        Preview::Loading => ("loading preview", Style::new().fg(Color::DarkGray)),
+        Preview::Ready(output) => (output.as_str(), Style::new()),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -247,7 +242,7 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview_output: &str) {
         .title(Span::styled(" preview ", Style::new().fg(Color::Gray)));
 
     frame.render_widget(
-        Paragraph::new(preview_output.to_string())
+        Paragraph::new(text.to_string())
             .style(style)
             .block(block)
             .wrap(Wrap { trim: true }),
