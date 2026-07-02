@@ -26,6 +26,7 @@ pub async fn run(app: &mut App) -> io::Result<Option<Value>> {
 
     loop {
         let mut should_draw = app.receive_pending_candidates() > 0;
+        should_draw |= app.receive_pending_preview();
 
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {
@@ -92,20 +93,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
 }
 
 fn update_text(app: &mut App, update: impl FnOnce(&mut String)) {
-    let mut value = app.value();
-    update(&mut value.editable_text);
+    let mut value = app.state().value();
+    value.edit_text(update);
     app.update_input(value);
 }
 
 fn render(frame: &mut Frame<'_>, app: &App) {
-    let input = app.value();
-    let mode = match app.mode() {
+    let state = app.state();
+    let input = state.value();
+    let mode = match state.mode() {
         InputMode::Search => "search",
         InputMode::Edit => "edit",
     };
-    let queue = app.queue_status().unwrap_or_default();
-    let results = app.results();
-    let selected_index = app.selected_index();
+    let queue = state.queue_status().unwrap_or_default();
+    let results = state.results();
+    let selected_index = state.selected_index();
 
     let area = frame.area();
     let shell = Block::default()
@@ -113,7 +115,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         .border_style(Style::new().fg(Color::DarkGray))
         .title(Line::from(vec![
             Span::styled(" fzlaunch ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {mode} "), mode_style(app.mode())),
+            Span::styled(format!(" {mode} "), mode_style(state.mode())),
         ]));
     let shell_area = shell.inner(area);
     frame.render_widget(shell, area);
@@ -127,7 +129,12 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         ])
         .split(shell_area);
 
-    render_input(frame, chunks[0], input.editable_text, app.mode());
+    render_input(
+        frame,
+        chunks[0],
+        input.editable_text().to_string(),
+        state.mode(),
+    );
     render_queue(frame, chunks[1], queue);
     render_result_area(
         frame,
@@ -470,7 +477,7 @@ mod tests {
             handle_key(&mut app, key(KeyCode::Enter)),
             KeyAction::Continue
         );
-        assert_eq!(app.queue_status(), Some("readlink -f {}".into()));
+        assert_eq!(app.state().queue_status(), Some("readlink -f {}".into()));
     }
 
     #[test]

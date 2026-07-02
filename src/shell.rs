@@ -1,9 +1,9 @@
 use crate::model::{InsertionPolicy, Value};
 
 pub fn render_value(value: &Value) -> String {
-    match value.insertion_policy {
-        InsertionPolicy::Raw => value.editable_text.clone(),
-        InsertionPolicy::Escaped => quote_posix(&value.editable_text),
+    match value.insertion_policy() {
+        InsertionPolicy::Raw => value.editable_text().to_string(),
+        InsertionPolicy::Escaped => quote_posix(value.editable_text()),
     }
 }
 

@@ -1,25 +1,40 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::pin::Pin;
+use std::process::Stdio;
+use std::time::Duration;
 
-use crate::model::{Candidate, Value};
+#[cfg(test)]
+use crate::model::Candidate;
+use crate::model::Value;
 use crate::shell;
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
-use crate::state::{InputMode, LauncherState, ResultRow};
+use crate::state::LauncherState;
 use crate::ui::tui;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
 use tokio::sync::mpsc::error::TryRecvError;
 
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 const PREVIEW_OUTPUT_LIMIT: usize = 64 * 1024;
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct App {
     state: LauncherState,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
     preview: PreviewState,
+    preview_sender: tokio::sync::mpsc::Sender<PreviewOutput>,
+    preview_receiver: tokio::sync::mpsc::Receiver<PreviewOutput>,
+    preview_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct PreviewState {
     command: Option<String>,
+    output: String,
+}
+
+struct PreviewOutput {
+    command: String,
     output: String,
 }
 
@@ -42,7 +57,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let path = std::env::var("PATH").unwrap_or_default();
     let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()?;
 
     if let Some(command) = runtime.block_on(async {
@@ -65,6 +80,7 @@ impl App {
 
     pub fn with_sources(sources: impl IntoIterator<Item = Box<dyn AsyncSource>>) -> Self {
         let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
+        let (preview_sender, preview_receiver) = tokio::sync::mpsc::channel(8);
         let source_tasks = sources
             .into_iter()
             .map(|source| source.stream_candidates(sender.clone()))
@@ -77,6 +93,9 @@ impl App {
             candidate_receiver,
             source_tasks,
             preview: PreviewState::default(),
+            preview_sender,
+            preview_receiver,
+            preview_task: None,
         }
     }
 
@@ -84,6 +103,7 @@ impl App {
         self.state.update_input(value);
     }
 
+    #[cfg(test)]
     pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
         self.state.feed(candidates);
     }
@@ -108,32 +128,8 @@ impl App {
         self.state.press_enter()
     }
 
-    pub fn queue_status(&self) -> Option<String> {
-        self.state.queue_status()
-    }
-
-    pub fn mode(&self) -> InputMode {
-        self.state.mode()
-    }
-
-    pub fn value(&self) -> Value {
-        self.state.value()
-    }
-
-    pub fn current(&self) -> Value {
-        self.state.current()
-    }
-
-    pub fn selected(&self) -> Option<Value> {
-        self.state.selected()
-    }
-
-    pub fn results(&self) -> Vec<ResultRow> {
-        self.state.results()
-    }
-
-    pub fn selected_index(&self) -> Option<usize> {
-        self.state.selected_index()
+    pub fn state(&self) -> &LauncherState {
+        &self.state
     }
 
     pub fn refresh_preview(&mut self) {
@@ -142,17 +138,38 @@ impl App {
             return;
         }
 
-        self.preview.output = command
-            .as_deref()
-            .map(preview_command_output)
-            .unwrap_or_else(|| "no preview".to_string());
-        self.preview.command = command;
+        if let Some(task) = self.preview_task.take() {
+            task.abort();
+        }
+
+        self.preview.command = command.clone();
+        let Some(command) = command else {
+            self.preview.output = "no preview".to_string();
+            return;
+        };
+
+        self.preview.output = "loading preview".to_string();
+        let sender = self.preview_sender.clone();
+        self.preview_task = Some(tokio::spawn(async move {
+            let output = preview_command_output(command.clone()).await;
+            let _ = sender.send(PreviewOutput { command, output }).await;
+        }));
     }
 
     pub fn preview_output(&self) -> &str {
         &self.preview.output
     }
 
+    #[cfg(test)]
+    pub async fn receive_preview(&mut self) -> bool {
+        let Some(preview) = self.preview_receiver.recv().await else {
+            return false;
+        };
+
+        self.apply_preview(preview)
+    }
+
+    #[cfg(test)]
     pub async fn receive_candidates(&mut self) -> bool {
         let Some(candidates) = self.candidate_receiver.recv().await else {
             return false;
@@ -176,33 +193,101 @@ impl App {
             }
         }
     }
+
+    pub fn receive_pending_preview(&mut self) -> bool {
+        let mut updated = false;
+
+        loop {
+            match self.preview_receiver.try_recv() {
+                Ok(preview) => updated |= self.apply_preview(preview),
+                Err(TryRecvError::Empty) => return updated,
+                Err(TryRecvError::Disconnected) => return updated,
+            }
+        }
+    }
+
+    fn apply_preview(&mut self, preview: PreviewOutput) -> bool {
+        if self.preview.command.as_deref() != Some(preview.command.as_str()) {
+            return false;
+        }
+
+        self.preview.output = preview.output;
+        true
+    }
 }
 
-fn preview_command_output(command: &str) -> String {
-    let output = Command::new("sh")
+async fn preview_command_output(command: String) -> String {
+    let output = tokio::time::timeout(PREVIEW_TIMEOUT, preview_command_output_inner(command)).await;
+
+    match output {
+        Ok(output) => output,
+        Err(_) => "preview timed out".to_string(),
+    }
+}
+
+async fn preview_command_output_inner(command: String) -> String {
+    let mut child = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .env("MANPAGER", "cat")
         .env("PAGER", "cat")
         .env("TERM", "dumb")
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return "preview failed".to_string(),
+    };
 
-    let Ok(output) = output else {
+    let Some(stdout) = child.stdout.take() else {
+        return "preview failed".to_string();
+    };
+    let Some(stderr) = child.stderr.take() else {
         return "preview failed".to_string();
     };
 
-    let bytes = if output.stdout.is_empty() {
-        output.stderr
-    } else {
-        output.stdout
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    limit_preview_output(text.trim_end())
+    let stdout = read_limited(Box::pin(stdout));
+    let stderr = read_limited(Box::pin(stderr));
+    let status = child.wait();
+    let (stdout, stderr, status) = tokio::join!(stdout, stderr, status);
+
+    if status.is_err() {
+        return "preview failed".to_string();
+    }
+
+    let stdout = stdout.unwrap_or_default();
+    let stderr = stderr.unwrap_or_default();
+    let bytes = if stdout.is_empty() { stderr } else { stdout };
+    let truncated = bytes.len() > PREVIEW_OUTPUT_LIMIT;
+    let bytes = &bytes[..bytes.len().min(PREVIEW_OUTPUT_LIMIT)];
+    let text = String::from_utf8_lossy(bytes);
+    limit_preview_output(text.trim_end(), truncated)
 }
 
-fn limit_preview_output(text: &str) -> String {
-    let mut output = text.chars().take(PREVIEW_OUTPUT_LIMIT).collect::<String>();
-    if text.chars().count() > PREVIEW_OUTPUT_LIMIT {
+async fn read_limited(mut reader: Pin<Box<dyn AsyncRead + Send>>) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            return Ok(output);
+        }
+
+        let remaining = PREVIEW_OUTPUT_LIMIT + 1 - output.len();
+        output.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
+
+        if output.len() > PREVIEW_OUTPUT_LIMIT {
+            return Ok(output);
+        }
+    }
+}
+
+fn limit_preview_output(text: &str, truncated: bool) -> String {
+    let mut output = text.to_string();
+    if truncated {
         output.push_str("\n...");
     }
     if output.is_empty() {
@@ -217,14 +302,19 @@ impl Drop for App {
         for task in &self.source_tasks {
             task.abort();
         }
+        if let Some(task) = &self.preview_task {
+            task.abort();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
+    use std::ops::Deref;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -233,6 +323,7 @@ mod tests {
 
     use super::*;
     use crate::sources::CandidateSender;
+    use crate::state::InputMode;
 
     struct MockSource {
         interval: Duration,
@@ -268,17 +359,57 @@ mod tests {
         assert!(app.receive_candidates().await);
     }
 
-    fn temp_app_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("fzlaunch-{name}-{unique}"));
-        fs::create_dir(&path).expect("temp app dir should be created");
-        path
+    struct TempDir {
+        path: PathBuf,
     }
 
-    fn path_string(dirs: &[PathBuf]) -> String {
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("fzlaunch-{name}-{unique}"));
+            fs::create_dir(&path).expect("temp app dir should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl AsRef<OsStr> for TempDir {
+        fn as_ref(&self) -> &OsStr {
+            self.path.as_os_str()
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn temp_app_dir(name: &str) -> TempDir {
+        TempDir::new(name)
+    }
+
+    fn path_string(dirs: impl IntoIterator<Item = impl AsRef<OsStr>>) -> String {
         std::env::join_paths(dirs)
             .expect("test paths should join")
             .to_str()
@@ -287,28 +418,30 @@ mod tests {
     }
 
     async fn receive_until_selected(app: &mut App) -> Value {
-        while app.selected().is_none() {
+        while app.state().selected().is_none() {
             assert!(app.receive_candidates().await);
         }
 
-        app.selected().expect("app should have selected value")
+        app.state()
+            .selected()
+            .expect("app should have selected value")
     }
 
-    #[test]
-    fn preview_command_output_captures_stdout() {
+    #[tokio::test]
+    async fn preview_command_output_captures_stdout() {
         assert_eq!(
-            preview_command_output("printf 'hello preview'"),
+            preview_command_output("printf 'hello preview'".to_string()).await,
             "hello preview"
         );
     }
 
     #[test]
     fn empty_preview_output_has_placeholder() {
-        assert_eq!(limit_preview_output(""), "no preview output");
+        assert_eq!(limit_preview_output("", false), "no preview output");
     }
 
-    #[test]
-    fn app_refreshes_preview_for_selected_candidate() {
+    #[tokio::test]
+    async fn app_refreshes_preview_for_selected_candidate() {
         let mut app = App::with_sources([]);
 
         app.feed([
@@ -318,6 +451,8 @@ mod tests {
         app.update_input(Value::raw(";fpaper"));
         app.refresh_preview();
 
+        assert_eq!(app.preview_output(), "loading preview");
+        assert!(app.receive_preview().await);
         assert_eq!(app.preview_output(), "paper preview");
     }
 
@@ -331,18 +466,24 @@ mod tests {
         ]);
         app.update_input(Value::raw(";fpaper"));
 
-        assert_eq!(app.selected(), Some(Value::escaped("/home/me/paper.pdf")));
-        assert_eq!(app.current(), Value::escaped("/home/me/paper.pdf"));
+        assert_eq!(
+            app.state().selected(),
+            Some(Value::escaped("/home/me/paper.pdf"))
+        );
+        assert_eq!(app.state().current(), Value::escaped("/home/me/paper.pdf"));
 
         app.press_tab();
-        assert_eq!(app.queue_status(), Some("'/home/me/paper.pdf'".into()));
+        assert_eq!(
+            app.state().queue_status(),
+            Some("'/home/me/paper.pdf'".into())
+        );
 
         app.update_input(Value::raw(";cnvim"));
-        assert_eq!(app.selected(), Some(Value::raw("nvim")));
+        assert_eq!(app.state().selected(), Some(Value::raw("nvim")));
 
         app.press_tilde();
-        assert_eq!(app.mode(), InputMode::Edit);
-        assert_eq!(app.value(), Value::raw("nvim"));
+        assert_eq!(app.state().mode(), InputMode::Edit);
+        assert_eq!(app.state().value(), Value::raw("nvim"));
 
         app.update_input(Value::raw("nvim {}"));
         assert_eq!(
@@ -359,28 +500,28 @@ mod tests {
 
         app.update_input(Value::raw(";m 10"));
         receive_next_candidate(&mut app).await;
-        assert_eq!(app.selected(), None);
+        assert_eq!(app.state().selected(), None);
 
         receive_next_candidate(&mut app).await;
-        assert_eq!(app.selected(), Some(Value::raw("1 00")));
+        assert_eq!(app.state().selected(), Some(Value::raw("1 00")));
 
         app.update_input(Value::raw(";m 50"));
-        assert_eq!(app.selected(), None);
+        assert_eq!(app.state().selected(), None);
 
         for _ in 2..=5 {
             receive_next_candidate(&mut app).await;
         }
 
-        assert_eq!(app.selected(), Some(Value::raw("5 00")));
+        assert_eq!(app.state().selected(), Some(Value::raw("5 00")));
 
         app.update_input(Value::raw(";m 10"));
-        assert_eq!(app.selected(), Some(Value::raw("1 00")));
+        assert_eq!(app.state().selected(), Some(Value::raw("1 00")));
 
         for _ in 6..=10 {
             receive_next_candidate(&mut app).await;
         }
 
-        assert_eq!(app.selected(), Some(Value::raw("10 00")));
+        assert_eq!(app.state().selected(), Some(Value::raw("10 00")));
     }
 
     #[tokio::test]
@@ -390,10 +531,10 @@ mod tests {
         let file = nested.join("paper.pdf");
         fs::create_dir(&nested).expect("nested test directory should be created");
         fs::write(&file, b"pdf").expect("test file should be written");
-        let mut app = App::start(root, "");
+        let mut app = App::start(root.path().to_path_buf(), "");
 
         app.update_input(Value::raw(";fpaper"));
-        assert_eq!(app.selected(), None);
+        assert_eq!(app.state().selected(), None);
 
         assert_eq!(
             receive_until_selected(&mut app).await,
@@ -414,7 +555,7 @@ mod tests {
             fs::Permissions::from_mode(0o755),
         )
         .expect("test executable permissions should be set");
-        let mut app = App::start(root, &path_string(&[bin]));
+        let mut app = App::start(root.path().to_path_buf(), &path_string([&bin]));
 
         app.update_input(Value::raw(";fpaper"));
         assert_eq!(

@@ -8,8 +8,8 @@ pub enum InsertionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
-    pub editable_text: String,
-    pub insertion_policy: InsertionPolicy,
+    editable_text: String,
+    insertion_policy: InsertionPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +114,25 @@ impl Value {
 
     pub fn has_slots(&self) -> bool {
         self.editable_text.contains("{}")
+    }
+
+    pub fn editable_text(&self) -> &str {
+        &self.editable_text
+    }
+
+    pub fn insertion_policy(&self) -> InsertionPolicy {
+        self.insertion_policy
+    }
+
+    pub fn with_editable_text(&self, editable_text: impl Into<String>) -> Self {
+        Self {
+            editable_text: editable_text.into(),
+            insertion_policy: self.insertion_policy,
+        }
+    }
+
+    pub fn edit_text(&mut self, update: impl FnOnce(&mut String)) {
+        update(&mut self.editable_text);
     }
 
     fn fill_slots_from_queue(self, values: &mut VecDeque<Value>) -> Self {

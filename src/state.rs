@@ -18,15 +18,21 @@ pub struct ResultRow {
 pub struct LauncherState {
     mode: InputMode,
     value: Value,
-    candidates: Vec<Candidate>,
+    candidates: Vec<CandidateEntry>,
     results: Vec<RankedCandidate>,
     selected_index: Option<usize>,
     queue: Queue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RankedCandidate {
+struct CandidateEntry {
     candidate: Candidate,
+    haystack: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RankedCandidate {
+    index: usize,
     row: ResultRow,
 }
 
@@ -56,18 +62,16 @@ impl Default for LauncherState {
 
 impl LauncherState {
     pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
-        self.candidates.extend(candidates);
+        self.candidates
+            .extend(candidates.into_iter().map(CandidateEntry::new));
         self.rerank();
     }
 
     pub fn update_input(&mut self, value: Value) {
         if self.mode == InputMode::Search {
-            if let Some(left_brace_index) = value.editable_text.find('{') {
-                let prefix = Value {
-                    editable_text: value.editable_text[..left_brace_index].to_string(),
-                    insertion_policy: value.insertion_policy,
-                };
-                let suffix = value.editable_text[left_brace_index..].to_string();
+            if let Some(left_brace_index) = value.editable_text().find('{') {
+                let prefix = value.with_editable_text(&value.editable_text()[..left_brace_index]);
+                let suffix = value.editable_text()[left_brace_index..].to_string();
 
                 self.value = prefix;
                 self.rerank();
@@ -75,7 +79,7 @@ impl LauncherState {
                 self.mode = InputMode::Edit;
                 self.results.clear();
                 self.selected_index = None;
-                self.value.editable_text.push_str(&suffix);
+                self.value.edit_text(|text| text.push_str(&suffix));
                 return;
             }
         }
@@ -88,35 +92,31 @@ impl LauncherState {
     }
 
     fn rerank(&mut self) {
-        let haystacks = self
-            .candidates
-            .iter()
-            .map(candidate_haystack)
-            .collect::<Vec<_>>();
-
-        if self.value.editable_text.is_empty() {
+        if self.value.editable_text().is_empty() {
             self.results = self
                 .candidates
                 .iter()
-                .cloned()
-                .zip(haystacks)
-                .map(|(candidate, haystack)| RankedCandidate {
-                    candidate,
+                .enumerate()
+                .map(|(index, entry)| RankedCandidate {
+                    index,
                     row: ResultRow {
-                        haystack,
+                        haystack: entry.haystack.clone(),
                         match_indices: Vec::new(),
                     },
                 })
                 .collect();
         } else {
-            let indexed_haystacks = haystacks
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(index, haystack)| IndexedHaystack { index, haystack });
+            let indexed_haystacks =
+                self.candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| IndexedHaystack {
+                        index,
+                        haystack: entry.haystack.clone(),
+                    });
             let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
             let pattern = Pattern::parse(
-                &self.value.editable_text,
+                self.value.editable_text(),
                 CaseMatching::Ignore,
                 Normalization::Smart,
             );
@@ -125,7 +125,7 @@ impl LauncherState {
                 .match_list(indexed_haystacks, &mut matcher)
                 .into_iter()
                 .map(|(matched, _)| RankedCandidate {
-                    candidate: self.candidates[matched.index].clone(),
+                    index: matched.index,
                     row: ResultRow {
                         match_indices: match_indices(&pattern, &matched.haystack, &mut matcher),
                         haystack: matched.haystack,
@@ -158,7 +158,7 @@ impl LauncherState {
     }
 
     pub fn press_tilde(&mut self) {
-        let value = if self.value.editable_text.is_empty() {
+        let value = if self.value.editable_text().is_empty() {
             Value::raw("")
         } else {
             self.current()
@@ -172,7 +172,7 @@ impl LauncherState {
 
     pub fn press_tab(&mut self) {
         let current = self.current();
-        if !current.editable_text.is_empty() {
+        if !current.editable_text().is_empty() {
             self.queue.compose(current);
         }
         self.reset_input();
@@ -180,7 +180,7 @@ impl LauncherState {
 
     pub fn press_enter(&mut self) -> Option<Value> {
         let current = self.current();
-        if current.editable_text.is_empty() {
+        if current.editable_text().is_empty() {
             self.reset_input();
             return None;
         }
@@ -189,7 +189,8 @@ impl LauncherState {
             if let Some(direct_action) = self
                 .selected_index
                 .and_then(|index| self.results.get(index))
-                .and_then(|result| result.candidate.direct_action().cloned())
+                .and_then(|result| self.candidates.get(result.index))
+                .and_then(|entry| entry.candidate.direct_action().cloned())
             {
                 self.queue.compose(direct_action);
             }
@@ -222,11 +223,11 @@ impl LauncherState {
 
         match self.selected() {
             Some(selected)
-                if selected.editable_text.len() < self.value.editable_text.len()
+                if selected.editable_text().len() < self.value.editable_text().len()
                     && self
                         .value
-                        .editable_text
-                        .starts_with(&selected.editable_text) =>
+                        .editable_text()
+                        .starts_with(selected.editable_text()) =>
             {
                 self.value.clone()
             }
@@ -238,7 +239,8 @@ impl LauncherState {
     pub fn selected(&self) -> Option<Value> {
         self.selected_index
             .and_then(|index| self.results.get(index))
-            .map(|result| result.candidate.value().clone())
+            .and_then(|result| self.candidates.get(result.index))
+            .map(|entry| entry.candidate.value().clone())
     }
 
     pub fn results(&self) -> Vec<ResultRow> {
@@ -256,8 +258,9 @@ impl LauncherState {
         let result = self
             .selected_index
             .and_then(|index| self.results.get(index))?;
-        let preview_command = result.candidate.preview_command()?.clone();
-        let mut queue = Queue::from_values([result.candidate.value().clone()]);
+        let entry = self.candidates.get(result.index)?;
+        let preview_command = entry.candidate.preview_command()?.clone();
+        let mut queue = Queue::from_values([entry.candidate.value().clone()]);
         queue.compose(preview_command);
         queue.status()
     }
@@ -269,12 +272,19 @@ impl LauncherState {
     }
 }
 
-fn candidate_haystack(candidate: &Candidate) -> String {
-    format!(
-        ";{} {}",
-        candidate.selector(),
-        candidate.value().editable_text
-    )
+impl CandidateEntry {
+    fn new(candidate: Candidate) -> Self {
+        let haystack = format!(
+            ";{} {}",
+            candidate.selector(),
+            candidate.value().editable_text()
+        );
+
+        Self {
+            candidate,
+            haystack,
+        }
+    }
 }
 
 fn match_indices(pattern: &Pattern, haystack: &str, matcher: &mut Matcher) -> Vec<usize> {
