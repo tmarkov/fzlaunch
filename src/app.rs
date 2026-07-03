@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::config::Config;
 use crate::model::Value;
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
@@ -29,12 +30,13 @@ pub fn run() {
 fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let path = std::env::var("PATH").unwrap_or_default();
+    let config = Config::load()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
 
     if let Some(command) = runtime.block_on(async {
-        let mut app = App::start(cwd, &path);
+        let mut app = App::start_with_config(cwd, &path, config);
         tui::run(&mut app).await
     })? {
         println!("{}", shell::render_value(&command));
@@ -44,11 +46,29 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn start(cwd: PathBuf, path: &str) -> Self {
-        Self::with_sources([
-            Box::new(FilesystemRoot { root: cwd }) as Box<dyn AsyncSource>,
-            Box::new(PathExecutables::from_path(path)) as Box<dyn AsyncSource>,
-        ])
+        Self::start_with_config(cwd, path, Config::default())
+    }
+
+    pub fn start_with_config(cwd: PathBuf, path: &str, config: Config) -> Self {
+        let mut sources = Vec::new();
+
+        if config.sources.filesystem.enabled {
+            sources.push(Box::new(FilesystemRoot::new_with_config(
+                cwd,
+                config.sources.filesystem,
+            )) as Box<dyn AsyncSource>);
+        }
+
+        if config.sources.path.enabled {
+            sources.push(Box::new(PathExecutables::from_path_with_config(
+                path,
+                config.sources.path,
+            )) as Box<dyn AsyncSource>);
+        }
+
+        Self::with_sources(sources)
     }
 
     pub fn with_sources(sources: impl IntoIterator<Item = Box<dyn AsyncSource>>) -> Self {
@@ -196,6 +216,7 @@ mod tests {
     use tokio::time;
 
     use super::*;
+    use crate::config::{Config, SourceConfig};
     use crate::model::Candidate;
     use crate::sources::CandidateSender;
     use crate::state::InputMode;
@@ -267,6 +288,10 @@ mod tests {
         app.state()
             .selected()
             .expect("app should have selected value")
+    }
+
+    async fn receive_all_candidates(app: &mut App) {
+        while app.receive_candidates().await {}
     }
 
     #[tokio::test]
@@ -400,5 +425,54 @@ mod tests {
             receive_until_selected(&mut app).await,
             Value::raw("fzlaunch-run-me")
         );
+    }
+
+    #[tokio::test]
+    async fn app_skips_disabled_sources() {
+        let root = temp_app_dir("app-disabled-sources-root");
+        let file = root.join("paper.pdf");
+        fs::write(&file, b"pdf").expect("test file should be written");
+        let bin = temp_app_dir("app-disabled-sources-path");
+        fs::write(bin.join("fzlaunch-run-me"), b"#!/bin/sh\n")
+            .expect("test executable should be written");
+        fs::set_permissions(
+            bin.join("fzlaunch-run-me"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("test executable permissions should be set");
+
+        let mut app_without_path = App::start_with_config(
+            root.path().to_path_buf(),
+            &path_string([&bin]),
+            Config {
+                sources: SourceConfig {
+                    path: crate::config::PathSourceConfig {
+                        enabled: false,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        receive_all_candidates(&mut app_without_path).await;
+        app_without_path.update_input(Value::raw(";crun"));
+        assert_eq!(app_without_path.state().selected(), None);
+
+        let mut app_without_filesystem = App::start_with_config(
+            root.path().to_path_buf(),
+            &path_string([&bin]),
+            Config {
+                sources: SourceConfig {
+                    filesystem: crate::config::FilesystemSourceConfig {
+                        enabled: false,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        receive_all_candidates(&mut app_without_filesystem).await;
+        app_without_filesystem.update_input(Value::raw(";fpaper"));
+        assert_eq!(app_without_filesystem.state().selected(), None);
     }
 }

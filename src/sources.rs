@@ -4,6 +4,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::config::{FilesystemSourceConfig, PathSourceConfig};
 use crate::model::{Candidate, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -17,21 +18,28 @@ pub trait AsyncSource: Send + 'static {
 
 pub struct PathExecutables {
     pub dirs: Vec<PathBuf>,
+    config: PathSourceConfig,
 }
 
 pub struct FilesystemRoot {
     pub root: PathBuf,
+    config: FilesystemSourceConfig,
 }
 
 impl PathExecutables {
+    #[cfg(test)]
     pub fn from_path(path: &str) -> Self {
+        Self::from_path_with_config(path, PathSourceConfig::default())
+    }
+
+    pub fn from_path_with_config(path: &str, config: PathSourceConfig) -> Self {
         let dirs = if path.is_empty() {
             Vec::new()
         } else {
             std::env::split_paths(path).collect()
         };
 
-        Self { dirs }
+        Self { dirs, config }
     }
 
     fn stream_candidate_batches(&self, sender: CandidateSender) {
@@ -41,7 +49,7 @@ impl PathExecutables {
             let candidates = executable_commands_in_dir(dir)
                 .into_iter()
                 .filter(|command| seen.insert(command.clone()))
-                .map(executable_candidate)
+                .map(|command| executable_candidate(command, &self.config))
                 .collect::<Vec<_>>();
 
             if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
@@ -60,13 +68,22 @@ impl AsyncSource for PathExecutables {
 }
 
 impl FilesystemRoot {
+    #[cfg(test)]
+    pub fn new(root: PathBuf) -> Self {
+        Self::new_with_config(root, FilesystemSourceConfig::default())
+    }
+
+    pub fn new_with_config(root: PathBuf, config: FilesystemSourceConfig) -> Self {
+        Self { root, config }
+    }
+
     fn stream_candidate_batches(&self, sender: CandidateSender) {
         let mut pending = vec![self.root.clone()];
 
         while let Some(dir) = pending.pop() {
             let candidates = filesystem_paths_in_dir(dir, &mut pending)
                 .into_iter()
-                .map(filesystem_candidate)
+                .map(|entry| filesystem_candidate(entry, &self.config))
                 .collect::<Vec<_>>();
             if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
                 break;
@@ -170,22 +187,29 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
-fn executable_candidate(command: String) -> Candidate {
-    Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}")))
-        .with_preview_command(Some(Value::raw("man {}")))
+fn executable_candidate(command: String, config: &PathSourceConfig) -> Candidate {
+    Candidate::new(Value::raw(command), 'c', Some(config.direct_action.clone()))
+        .with_preview_command(Some(config.preview_command.clone()))
 }
 
-fn filesystem_candidate(entry: (String, FilesystemEntryKind)) -> Candidate {
+fn filesystem_candidate(
+    entry: (String, FilesystemEntryKind),
+    config: &FilesystemSourceConfig,
+) -> Candidate {
     let (path, match_char, preview_command) = match entry {
-        (path, FilesystemEntryKind::Directory) => (path, 'd', Some(Value::raw("ls {}"))),
-        (path, FilesystemEntryKind::TextFile) => (path, 'f', Some(Value::raw("cat {}"))),
+        (path, FilesystemEntryKind::Directory) => {
+            (path, 'd', Some(config.directory_preview_command.clone()))
+        }
+        (path, FilesystemEntryKind::TextFile) => {
+            (path, 'f', Some(config.text_file_preview_command.clone()))
+        }
         (path, FilesystemEntryKind::BinaryFile) => (path, 'f', None),
     };
 
     Candidate::new(
         Value::escaped(path),
         match_char,
-        Some(Value::raw("xdg-open {}")),
+        Some(config.direct_action.clone()),
     )
     .with_preview_command(preview_command)
 }
@@ -200,6 +224,7 @@ mod tests {
     use crate::sources::{AsyncSource, CandidateSender};
     use crate::state::LauncherState;
     use crate::test_support::{path_string, TempDir};
+    use crate::{config::FilesystemSourceConfig, config::PathSourceConfig};
     use tokio::task::JoinHandle;
 
     fn temp_source_dir(name: &str) -> TempDir {
@@ -278,6 +303,10 @@ mod tests {
         )
     }
 
+    fn filesystem_root(root: &Path) -> super::FilesystemRoot {
+        super::FilesystemRoot::new(root.to_path_buf())
+    }
+
     #[tokio::test]
     async fn collect_sources_combines_multiple_sources() {
         let commands = StaticSource {
@@ -353,6 +382,32 @@ mod tests {
         .await;
 
         assert_eq!(candidates, Vec::<Candidate>::new());
+    }
+
+    #[tokio::test]
+    async fn path_source_uses_configured_actions() {
+        let bin = temp_source_dir("path-source-configured-actions");
+        write_file(bin.join("fzlaunch-test-command"), 0o755);
+
+        let candidates = collect_source(Box::new(super::PathExecutables::from_path_with_config(
+            bin.to_str().expect("path should be utf-8"),
+            PathSourceConfig {
+                direct_action: Value::raw("run-command {}"),
+                preview_command: Value::raw("help-command {}"),
+                ..PathSourceConfig::default()
+            },
+        )))
+        .await;
+
+        assert_eq!(
+            candidates,
+            vec![Candidate::new(
+                Value::raw("fzlaunch-test-command"),
+                'c',
+                Some(Value::raw("run-command {}"))
+            )
+            .with_preview_command(Some(Value::raw("help-command {}")))]
+        );
     }
 
     #[tokio::test]
@@ -468,9 +523,7 @@ mod tests {
         state.feed(
             collect_sources(vec![
                 Box::new(super::PathExecutables::from_path(&path)),
-                Box::new(super::FilesystemRoot {
-                    root: root.path().to_path_buf(),
-                }),
+                Box::new(filesystem_root(root.path())),
             ])
             .await,
         );
@@ -502,10 +555,7 @@ mod tests {
         let file = root.join("paper with spaces.pdf");
         fs::write(&file, b"pdf").expect("test file should be written");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert_eq!(candidates, vec![expected_text_file(&file)]);
     }
@@ -516,10 +566,7 @@ mod tests {
         let file = root.join("binary-file");
         fs::write(&file, b"\0binary").expect("test binary file should be written");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert_eq!(candidates, vec![expected_binary_file(&file)]);
     }
@@ -535,10 +582,7 @@ mod tests {
         fs::write(&second, b"second").expect("second test file should be written");
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
 
-        let task = Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        })
-        .stream_candidates(sender);
+        let task = Box::new(filesystem_root(root.path())).stream_candidates(sender);
         let first_batch = receiver
             .recv()
             .await
@@ -564,10 +608,7 @@ mod tests {
         let dir = root.join("Documents");
         fs::create_dir(&dir).expect("test directory should be created");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert_eq!(candidates, vec![expected_directory(&dir)]);
     }
@@ -580,10 +621,7 @@ mod tests {
         fs::write(&file, b"text").expect("test file should be written");
         fs::create_dir(&dir).expect("test directory should be created");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert_eq!(
             candidates,
@@ -596,7 +634,7 @@ mod tests {
         let missing_root = temp_source_dir("filesystem-source-missing");
         let root = missing_root.join("missing");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot { root })).await;
+        let candidates = collect_source(Box::new(super::FilesystemRoot::new(root))).await;
 
         assert_eq!(candidates, Vec::<Candidate>::new());
     }
@@ -608,12 +646,7 @@ mod tests {
         fs::write(&file, b"pdf").expect("test file should be written");
         let mut state = LauncherState::default();
 
-        state.feed(
-            collect_source(Box::new(super::FilesystemRoot {
-                root: root.path().to_path_buf(),
-            }))
-            .await,
-        );
+        state.feed(collect_source(Box::new(filesystem_root(root.path()))).await);
         state.update_input(Value::raw(";fpaper"));
 
         assert_eq!(
@@ -632,12 +665,7 @@ mod tests {
         fs::create_dir(&dir).expect("test directory should be created");
         let mut state = LauncherState::default();
 
-        state.feed(
-            collect_source(Box::new(super::FilesystemRoot {
-                root: root.path().to_path_buf(),
-            }))
-            .await,
-        );
+        state.feed(collect_source(Box::new(filesystem_root(root.path()))).await);
         state.update_input(Value::raw(";ddoc"));
 
         assert_eq!(
@@ -657,10 +685,7 @@ mod tests {
         fs::create_dir_all(&nested).expect("nested test directory should be created");
         fs::write(&file, b"pdf").expect("nested test file should be written");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert!(candidates.contains(&expected_directory(&nested)));
         assert!(candidates.contains(&expected_text_file(&file)));
@@ -676,10 +701,7 @@ mod tests {
         fs::write(&file, b"pdf").expect("nested test file should be written");
         symlink(&root, &loop_link).expect("symlink loop should be created");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert!(candidates.contains(&expected_directory(&nested)));
         assert!(candidates.contains(&expected_text_file(&file)));
@@ -694,11 +716,46 @@ mod tests {
         fs::create_dir_all(&deep).expect("deep test directory should be created");
         fs::write(&file, b"text").expect("deep test file should be written");
 
-        let candidates = collect_source(Box::new(super::FilesystemRoot {
-            root: root.path().to_path_buf(),
-        }))
-        .await;
+        let candidates = collect_source(Box::new(filesystem_root(root.path()))).await;
 
         assert!(candidates.contains(&expected_text_file(&file)));
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_uses_configured_actions() {
+        let root = temp_source_dir("filesystem-source-configured-actions");
+        let dir = root.join("Documents");
+        let file = root.join("paper.txt");
+        fs::create_dir(&dir).expect("test directory should be created");
+        fs::write(&file, b"text").expect("test file should be written");
+
+        let candidates = collect_source(Box::new(super::FilesystemRoot::new_with_config(
+            root.path().to_path_buf(),
+            FilesystemSourceConfig {
+                direct_action: Value::raw("open-path {}"),
+                directory_preview_command: Value::raw("list-path {}"),
+                text_file_preview_command: Value::raw("show-text {}"),
+                ..FilesystemSourceConfig::default()
+            },
+        )))
+        .await;
+
+        assert_eq!(
+            candidates,
+            vec![
+                Candidate::new(
+                    Value::escaped(dir.to_str().expect("path should be utf-8")),
+                    'd',
+                    Some(Value::raw("open-path {}"))
+                )
+                .with_preview_command(Some(Value::raw("list-path {}"))),
+                Candidate::new(
+                    Value::escaped(file.to_str().expect("path should be utf-8")),
+                    'f',
+                    Some(Value::raw("open-path {}"))
+                )
+                .with_preview_command(Some(Value::raw("show-text {}"))),
+            ]
+        );
     }
 }

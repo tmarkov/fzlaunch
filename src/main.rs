@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod model;
 mod preview;
 mod shell;
