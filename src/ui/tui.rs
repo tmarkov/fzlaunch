@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::cursor;
@@ -16,35 +18,93 @@ use crate::app::App;
 use crate::model::Value;
 use crate::preview::Preview;
 use crate::state::{InputMode, ResultRow};
+use tokio::sync::mpsc;
 
-const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
+const EVENT_CHANNEL_CAPACITY: usize = 16;
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const BLOCKING_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RESULT_HIGHLIGHT_SYMBOL: &str = "> ";
 
 pub async fn run(app: &mut App) -> io::Result<Option<Value>> {
     let mut terminal = TerminalSession::enter()?;
+    let mut events = TerminalEvents::start();
     app.refresh_preview();
     terminal.draw(app)?;
 
     loop {
         let mut should_draw = app.receive_pending_candidates() > 0;
         should_draw |= app.receive_pending_preview();
-        tokio::task::yield_now().await;
 
-        if event::poll(EVENT_POLL_INTERVAL)? {
-            match event::read()? {
-                Event::Key(key) => match handle_key(app, key) {
-                    KeyAction::Continue => should_draw = true,
-                    KeyAction::Quit(command) => return Ok(command),
-                },
-                Event::Resize(_, _) => should_draw = true,
-                _ => {}
+        tokio::select! {
+            event = events.recv() => {
+                match event? {
+                    Some(Event::Key(key)) => match handle_key(app, key) {
+                        KeyAction::Continue => should_draw = true,
+                        KeyAction::Quit(command) => return Ok(command),
+                    },
+                    Some(Event::Resize(_, _)) => should_draw = true,
+                    Some(_) => {}
+                    None => return Ok(None),
+                }
             }
+            _ = tokio::time::sleep(EVENT_POLL_INTERVAL) => {}
         }
 
         if should_draw {
             app.refresh_preview();
             terminal.draw(app)?;
         }
+    }
+}
+
+struct TerminalEvents {
+    receiver: mpsc::Receiver<io::Result<Event>>,
+    stop: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TerminalEvents {
+    fn start() -> Self {
+        let (sender, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = Arc::clone(&stop);
+        let task = tokio::task::spawn_blocking(move || loop {
+            if task_stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            match event::poll(BLOCKING_EVENT_POLL_INTERVAL) {
+                Ok(true) => {
+                    let event = event::read();
+                    let should_stop = event.is_err();
+                    if sender.blocking_send(event).is_err() || should_stop {
+                        break;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let _ = sender.blocking_send(Err(error));
+                    break;
+                }
+            }
+        });
+
+        Self {
+            receiver,
+            stop,
+            task,
+        }
+    }
+
+    async fn recv(&mut self) -> io::Result<Option<Event>> {
+        self.receiver.recv().await.transpose()
+    }
+}
+
+impl Drop for TerminalEvents {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.task.abort();
     }
 }
 
