@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::model::Value;
+use crate::model::{Candidate, Queue, Value};
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
@@ -122,7 +122,7 @@ impl App {
     }
 
     pub fn refresh_preview(&mut self) {
-        let command = self.state.selected_preview_command();
+        let command = selected_preview_command(self.state.selected());
         if self.preview_command == command {
             return;
         }
@@ -196,6 +196,14 @@ impl App {
         self.preview = preview.preview;
         true
     }
+}
+
+fn selected_preview_command(candidate: Option<Candidate>) -> Option<String> {
+    let candidate = candidate?;
+    let preview_command = candidate.preview_command()?.clone();
+    let mut queue = Queue::from_values([candidate.value().clone()]);
+    queue.compose(preview_command);
+    queue.status()
 }
 
 impl Drop for App {
@@ -280,14 +288,18 @@ mod tests {
         TempDir::new(name)
     }
 
+    fn selected_value(app: &App) -> Option<Value> {
+        app.state()
+            .selected()
+            .map(|candidate| candidate.value().clone())
+    }
+
     async fn receive_until_selected(app: &mut App) -> Value {
-        while app.state().selected().is_none() {
+        while selected_value(app).is_none() {
             assert!(app.receive_candidates().await);
         }
 
-        app.state()
-            .selected()
-            .expect("app should have selected value")
+        selected_value(app).expect("app should have selected value")
     }
 
     async fn receive_all_candidates(app: &mut App) {
@@ -324,7 +336,7 @@ mod tests {
         app.update_input(Value::raw(";fpaper"));
 
         assert_eq!(
-            app.state().selected(),
+            selected_value(&app),
             Some(Value::escaped("/home/me/paper.pdf"))
         );
         assert_eq!(app.state().current(), Value::escaped("/home/me/paper.pdf"));
@@ -336,7 +348,7 @@ mod tests {
         );
 
         app.update_input(Value::raw(";cnvim"));
-        assert_eq!(app.state().selected(), Some(Value::raw("nvim")));
+        assert_eq!(selected_value(&app), Some(Value::raw("nvim")));
 
         app.press_tilde();
         assert_eq!(app.state().mode(), InputMode::Edit);
@@ -357,28 +369,28 @@ mod tests {
 
         app.update_input(Value::raw(";m 10"));
         receive_next_candidate(&mut app).await;
-        assert_eq!(app.state().selected(), None);
+        assert_eq!(selected_value(&app), None);
 
         receive_next_candidate(&mut app).await;
-        assert_eq!(app.state().selected(), Some(Value::raw("1 00")));
+        assert_eq!(selected_value(&app), Some(Value::raw("1 00")));
 
         app.update_input(Value::raw(";m 50"));
-        assert_eq!(app.state().selected(), None);
+        assert_eq!(selected_value(&app), None);
 
         for _ in 2..=5 {
             receive_next_candidate(&mut app).await;
         }
 
-        assert_eq!(app.state().selected(), Some(Value::raw("5 00")));
+        assert_eq!(selected_value(&app), Some(Value::raw("5 00")));
 
         app.update_input(Value::raw(";m 10"));
-        assert_eq!(app.state().selected(), Some(Value::raw("1 00")));
+        assert_eq!(selected_value(&app), Some(Value::raw("1 00")));
 
         for _ in 6..=10 {
             receive_next_candidate(&mut app).await;
         }
 
-        assert_eq!(app.state().selected(), Some(Value::raw("10 00")));
+        assert_eq!(selected_value(&app), Some(Value::raw("10 00")));
     }
 
     #[tokio::test]
@@ -391,7 +403,7 @@ mod tests {
         let mut app = App::start(root.path().to_path_buf(), "");
 
         app.update_input(Value::raw(";fpaper"));
-        assert_eq!(app.state().selected(), None);
+        assert_eq!(selected_value(&app), None);
 
         assert_eq!(
             receive_until_selected(&mut app).await,
@@ -456,7 +468,7 @@ mod tests {
         );
         receive_all_candidates(&mut app_without_path).await;
         app_without_path.update_input(Value::raw(";crun"));
-        assert_eq!(app_without_path.state().selected(), None);
+        assert_eq!(selected_value(&app_without_path), None);
 
         let mut app_without_filesystem = App::start_with_config(
             root.path().to_path_buf(),
@@ -473,6 +485,6 @@ mod tests {
         );
         receive_all_candidates(&mut app_without_filesystem).await;
         app_without_filesystem.update_input(Value::raw(";fpaper"));
-        assert_eq!(app_without_filesystem.state().selected(), None);
+        assert_eq!(selected_value(&app_without_filesystem), None);
     }
 }

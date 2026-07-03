@@ -221,7 +221,7 @@ impl LauncherState {
             return self.value.clone();
         }
 
-        match self.selected() {
+        match self.selected_value() {
             Some(selected)
                 if selected.editable_text().len() < self.value.editable_text().len()
                     && self
@@ -236,11 +236,8 @@ impl LauncherState {
         }
     }
 
-    pub fn selected(&self) -> Option<Value> {
-        self.selected_index
-            .and_then(|index| self.results.get(index))
-            .and_then(|result| self.candidates.get(result.index))
-            .map(|entry| entry.candidate.value().clone())
+    pub fn selected(&self) -> Option<Candidate> {
+        self.selected_entry().map(|entry| entry.candidate.clone())
     }
 
     pub fn results(&self) -> Vec<ResultRow> {
@@ -254,21 +251,21 @@ impl LauncherState {
         self.selected_index
     }
 
-    pub fn selected_preview_command(&self) -> Option<String> {
-        let result = self
-            .selected_index
-            .and_then(|index| self.results.get(index))?;
-        let entry = self.candidates.get(result.index)?;
-        let preview_command = entry.candidate.preview_command()?.clone();
-        let mut queue = Queue::from_values([entry.candidate.value().clone()]);
-        queue.compose(preview_command);
-        queue.status()
-    }
-
     fn reset_input(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
         self.rerank();
+    }
+
+    fn selected_entry(&self) -> Option<&CandidateEntry> {
+        self.selected_index
+            .and_then(|index| self.results.get(index))
+            .and_then(|result| self.candidates.get(result.index))
+    }
+
+    fn selected_value(&self) -> Option<Value> {
+        self.selected_entry()
+            .map(|entry| entry.candidate.value().clone())
     }
 }
 
@@ -301,6 +298,10 @@ fn match_indices(pattern: &Pattern, haystack: &str, matcher: &mut Matcher) -> Ve
 mod tests {
     use super::*;
 
+    fn selected_value(state: &LauncherState) -> Option<Value> {
+        state.selected().map(|candidate| candidate.value().clone())
+    }
+
     #[test]
     fn initial_tilde_enters_edit_mode_with_empty_raw_buffer() {
         let mut state = LauncherState::default();
@@ -325,7 +326,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::escaped("/home/me/Documents/research"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -400,7 +401,7 @@ mod tests {
             Candidate::new(Value::escaped("/home/me/Documents/research"), 'd', None),
         ]);
 
-        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+        assert_eq!(selected_value(&state), Some(Value::raw("firefox")));
     }
 
     #[test]
@@ -448,31 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn selected_preview_command_fills_selected_value() {
-        let mut state = LauncherState::default();
-
-        state.feed([
-            Candidate::new(Value::escaped("/home/me/paper with spaces.pdf"), 'f', None)
-                .with_preview_command(Some(Value::raw("cat {}"))),
-        ]);
-        state.update_input(Value::raw("paper"));
-
-        assert_eq!(
-            state.selected_preview_command(),
-            Some("cat '/home/me/paper with spaces.pdf'".to_string())
-        );
-    }
-
-    #[test]
-    fn selected_preview_command_returns_none_without_preview() {
-        let mut state = LauncherState::default();
-
-        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
-
-        assert_eq!(state.selected_preview_command(), None);
-    }
-
-    #[test]
     fn feeding_new_candidates_resets_selection_to_first_match() {
         let mut state = LauncherState::default();
 
@@ -481,14 +457,14 @@ mod tests {
             Candidate::new(Value::raw("second"), 'c', None),
         ]);
         state.select_next();
-        assert_eq!(state.selected(), Some(Value::raw("second")));
+        assert_eq!(selected_value(&state), Some(Value::raw("second")));
 
         state.feed([
             Candidate::new(Value::raw("new-first"), 'c', None),
             Candidate::new(Value::raw("new-second"), 'c', None),
         ]);
 
-        assert_eq!(state.selected(), Some(Value::raw("first")));
+        assert_eq!(selected_value(&state), Some(Value::raw("first")));
     }
 
     #[test]
@@ -502,7 +478,7 @@ mod tests {
         state.select_next();
         state.select_previous();
 
-        assert_eq!(state.selected(), Some(Value::raw("first")));
+        assert_eq!(selected_value(&state), Some(Value::raw("first")));
     }
 
     #[test]
@@ -516,7 +492,7 @@ mod tests {
         state.select_next();
         state.select_next();
 
-        assert_eq!(state.selected(), Some(Value::raw("second")));
+        assert_eq!(selected_value(&state), Some(Value::raw("second")));
     }
 
     #[test]
@@ -529,7 +505,7 @@ mod tests {
         ]);
         state.select_previous();
 
-        assert_eq!(state.selected(), Some(Value::raw("first")));
+        assert_eq!(selected_value(&state), Some(Value::raw("first")));
     }
 
     #[test]
@@ -538,7 +514,7 @@ mod tests {
 
         state.select_next();
 
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
         assert_eq!(state.value(), Value::raw(""));
         assert_eq!(state.mode(), InputMode::Search);
     }
@@ -549,7 +525,7 @@ mod tests {
 
         state.select_previous();
 
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
         assert_eq!(state.value(), Value::raw(""));
         assert_eq!(state.mode(), InputMode::Search);
     }
@@ -560,7 +536,7 @@ mod tests {
 
         state.feed([]);
 
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -573,7 +549,7 @@ mod tests {
         ]);
         state.update_input(Value::raw(";c"));
 
-        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+        assert_eq!(selected_value(&state), Some(Value::raw("firefox")));
     }
 
     #[test]
@@ -587,7 +563,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            state.selected(),
+            selected_value(&state),
             Some(Value::escaped("/home/user/files/paper.pdf"))
         );
     }
@@ -599,7 +575,7 @@ mod tests {
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("zzz"));
 
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -614,7 +590,7 @@ mod tests {
         )]);
         state.update_input(Value::raw(";c"));
 
-        assert_eq!(state.selected(), Some(Value::raw("calculator")));
+        assert_eq!(selected_value(&state), Some(Value::raw("calculator")));
     }
 
     #[test]
@@ -627,7 +603,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("f"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -639,12 +615,12 @@ mod tests {
             Candidate::new(Value::raw("firefox"), 'c', None),
         ]);
         state.select_next();
-        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+        assert_eq!(selected_value(&state), Some(Value::raw("firefox")));
 
         state.update_input(Value::raw(";f"));
 
         assert_eq!(
-            state.selected(),
+            selected_value(&state),
             Some(Value::escaped("/home/user/files/firefox"))
         );
     }
@@ -664,7 +640,7 @@ mod tests {
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw(";f firefox"));
         assert_eq!(state.current(), Value::raw(";f firefox"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -676,7 +652,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -690,7 +666,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("ps aux | grep firefox"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -704,7 +680,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("mv {"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -718,7 +694,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("{"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -751,7 +727,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+        assert_eq!(selected_value(&state), Some(Value::raw("firefox")));
         assert_eq!(state.queue_status(), Some("'/home/me/paper.pdf'".into()));
     }
 
@@ -768,7 +744,7 @@ mod tests {
 
         state.update_input(Value::raw(";c"));
 
-        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+        assert_eq!(selected_value(&state), Some(Value::raw("firefox")));
     }
 
     #[test]
@@ -780,7 +756,7 @@ mod tests {
         assert_eq!(state.queue_status(), None);
         assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -842,7 +818,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), Some(Value::raw("evince")));
+        assert_eq!(selected_value(&state), Some(Value::raw("evince")));
         assert_eq!(
             state.queue_status(),
             Some("evince '/home/me/paper.pdf'".into())
@@ -862,7 +838,7 @@ mod tests {
 
         state.update_input(Value::raw("fire"));
 
-        assert_eq!(state.selected(), Some(Value::raw("firefox")));
+        assert_eq!(selected_value(&state), Some(Value::raw("firefox")));
     }
 
     #[test]
@@ -874,7 +850,7 @@ mod tests {
         assert_eq!(state.queue_status(), None);
         assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw(""));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
@@ -901,7 +877,7 @@ mod tests {
         assert_eq!(enter_state.queue_status(), tab_state.queue_status());
         assert_eq!(enter_state.mode(), tab_state.mode());
         assert_eq!(enter_state.value(), tab_state.value());
-        assert_eq!(enter_state.selected(), tab_state.selected());
+        assert_eq!(selected_value(&enter_state), selected_value(&tab_state));
     }
 
     #[test]
@@ -995,7 +971,7 @@ mod tests {
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("mv {}"));
-        assert_eq!(state.selected(), None);
+        assert_eq!(selected_value(&state), None);
     }
 
     #[test]
