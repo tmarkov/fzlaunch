@@ -17,7 +17,14 @@ pub struct Candidate {
     value: Value,
     selector: char,
     direct_action: Option<Value>,
-    preview_command: Option<Value>,
+    source: CandidateSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateSource {
+    Generic,
+    PathExecutable,
+    FilesystemPath,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,12 +168,12 @@ impl Candidate {
             value,
             selector,
             direct_action,
-            preview_command: None,
+            source: CandidateSource::Generic,
         }
     }
 
-    pub fn with_preview_command(mut self, preview_command: Option<Value>) -> Self {
-        self.preview_command = preview_command;
+    pub fn with_source(mut self, source: CandidateSource) -> Self {
+        self.source = source;
         self
     }
 
@@ -182,8 +189,8 @@ impl Candidate {
         self.selector
     }
 
-    pub(crate) fn preview_command(&self) -> Option<&Value> {
-        self.preview_command.as_ref()
+    pub(crate) fn source(&self) -> CandidateSource {
+        self.source
     }
 }
 

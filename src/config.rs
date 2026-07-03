@@ -17,6 +17,11 @@ enabled = true
 direct_action = "xdg-open {}"
 directory_preview_command = "ls {}"
 text_file_preview_command = "cat {}"
+document_preview_command = "file {}"
+image_preview_command = "file {}"
+archive_preview_command = "file {}"
+media_preview_command = "file {}"
+binary_preview_command = ""
 "#;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,8 +46,13 @@ pub struct PathSourceConfig {
 pub struct FilesystemSourceConfig {
     pub enabled: bool,
     pub direct_action: Value,
-    pub directory_preview_command: Value,
-    pub text_file_preview_command: Value,
+    pub directory_preview_command: Option<Value>,
+    pub text_file_preview_command: Option<Value>,
+    pub document_preview_command: Option<Value>,
+    pub image_preview_command: Option<Value>,
+    pub archive_preview_command: Option<Value>,
+    pub media_preview_command: Option<Value>,
+    pub binary_preview_command: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -126,8 +136,13 @@ impl Default for FilesystemSourceConfig {
         Self {
             enabled: true,
             direct_action: Value::raw("xdg-open {}"),
-            directory_preview_command: Value::raw("ls {}"),
-            text_file_preview_command: Value::raw("cat {}"),
+            directory_preview_command: Some(Value::raw("ls {}")),
+            text_file_preview_command: Some(Value::raw("cat {}")),
+            document_preview_command: Some(Value::raw("file {}")),
+            image_preview_command: Some(Value::raw("file {}")),
+            archive_preview_command: Some(Value::raw("file {}")),
+            media_preview_command: Some(Value::raw("file {}")),
+            binary_preview_command: None,
         }
     }
 }
@@ -182,15 +197,43 @@ impl From<FilesystemSourceConfigFile> for FilesystemSourceConfig {
                 .direct_action
                 .map(Value::raw)
                 .unwrap_or(defaults.direct_action),
-            directory_preview_command: file
-                .directory_preview_command
-                .map(Value::raw)
-                .unwrap_or(defaults.directory_preview_command),
-            text_file_preview_command: file
-                .text_file_preview_command
-                .map(Value::raw)
-                .unwrap_or(defaults.text_file_preview_command),
+            directory_preview_command: preview_command(
+                file.directory_preview_command,
+                defaults.directory_preview_command,
+            ),
+            text_file_preview_command: preview_command(
+                file.text_file_preview_command,
+                defaults.text_file_preview_command,
+            ),
+            document_preview_command: preview_command(
+                file.document_preview_command,
+                defaults.document_preview_command,
+            ),
+            image_preview_command: preview_command(
+                file.image_preview_command,
+                defaults.image_preview_command,
+            ),
+            archive_preview_command: preview_command(
+                file.archive_preview_command,
+                defaults.archive_preview_command,
+            ),
+            media_preview_command: preview_command(
+                file.media_preview_command,
+                defaults.media_preview_command,
+            ),
+            binary_preview_command: preview_command(
+                file.binary_preview_command,
+                defaults.binary_preview_command,
+            ),
         }
+    }
+}
+
+fn preview_command(configured: Option<String>, default: Option<Value>) -> Option<Value> {
+    match configured {
+        Some(command) if command.is_empty() => None,
+        Some(command) => Some(Value::raw(command)),
+        None => default,
     }
 }
 
@@ -252,6 +295,11 @@ struct FilesystemSourceConfigFile {
     direct_action: Option<String>,
     directory_preview_command: Option<String>,
     text_file_preview_command: Option<String>,
+    document_preview_command: Option<String>,
+    image_preview_command: Option<String>,
+    archive_preview_command: Option<String>,
+    media_preview_command: Option<String>,
+    binary_preview_command: Option<String>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -291,8 +339,13 @@ mod tests {
                     filesystem: FilesystemSourceConfig {
                         enabled: true,
                         direct_action: Value::raw("xdg-open {}"),
-                        directory_preview_command: Value::raw("ls {}"),
-                        text_file_preview_command: Value::raw("cat {}"),
+                        directory_preview_command: Some(Value::raw("ls {}")),
+                        text_file_preview_command: Some(Value::raw("cat {}")),
+                        document_preview_command: Some(Value::raw("file {}")),
+                        image_preview_command: Some(Value::raw("file {}")),
+                        archive_preview_command: Some(Value::raw("file {}")),
+                        media_preview_command: Some(Value::raw("file {}")),
+                        binary_preview_command: None,
                     },
                 },
             }
@@ -343,6 +396,11 @@ enabled = false
 direct_action = "open-path {}"
 directory_preview_command = "list-path {}"
 text_file_preview_command = "show-text {}"
+document_preview_command = "show-document {}"
+image_preview_command = "show-image {}"
+archive_preview_command = "show-archive {}"
+media_preview_command = "show-media {}"
+binary_preview_command = "show-binary {}"
 "#,
         )
         .expect("test config should be written");
@@ -359,8 +417,13 @@ text_file_preview_command = "show-text {}"
                     filesystem: FilesystemSourceConfig {
                         enabled: false,
                         direct_action: Value::raw("open-path {}"),
-                        directory_preview_command: Value::raw("list-path {}"),
-                        text_file_preview_command: Value::raw("show-text {}"),
+                        directory_preview_command: Some(Value::raw("list-path {}")),
+                        text_file_preview_command: Some(Value::raw("show-text {}")),
+                        document_preview_command: Some(Value::raw("show-document {}")),
+                        image_preview_command: Some(Value::raw("show-image {}")),
+                        archive_preview_command: Some(Value::raw("show-archive {}")),
+                        media_preview_command: Some(Value::raw("show-media {}")),
+                        binary_preview_command: Some(Value::raw("show-binary {}")),
                     },
                 },
             }

@@ -1,7 +1,9 @@
-use std::path::PathBuf;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
-use crate::config::Config;
-use crate::model::{Candidate, Queue, Value};
+use crate::config::{Config, FilesystemSourceConfig};
+use crate::model::{Candidate, CandidateSource, Queue, Value};
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
 use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
@@ -13,6 +15,7 @@ const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 
 pub struct App {
     state: LauncherState,
+    config: Config,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
     preview_command: Option<String>,
@@ -57,21 +60,29 @@ impl App {
         if config.sources.filesystem.enabled {
             sources.push(Box::new(FilesystemRoot::new_with_config(
                 cwd,
-                config.sources.filesystem,
+                config.sources.filesystem.clone(),
             )) as Box<dyn AsyncSource>);
         }
 
         if config.sources.path.enabled {
             sources.push(Box::new(PathExecutables::from_path_with_config(
                 path,
-                config.sources.path,
+                config.sources.path.clone(),
             )) as Box<dyn AsyncSource>);
         }
 
-        Self::with_sources(sources)
+        Self::with_sources_and_config(sources, config)
     }
 
+    #[cfg(test)]
     pub fn with_sources(sources: impl IntoIterator<Item = Box<dyn AsyncSource>>) -> Self {
+        Self::with_sources_and_config(sources, Config::default())
+    }
+
+    fn with_sources_and_config(
+        sources: impl IntoIterator<Item = Box<dyn AsyncSource>>,
+        config: Config,
+    ) -> Self {
         let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
         let (preview_sender, preview_receiver) = tokio::sync::mpsc::channel(8);
         let source_tasks = sources
@@ -84,6 +95,7 @@ impl App {
 
         Self {
             state: LauncherState::default(),
+            config,
             candidate_receiver,
             source_tasks,
             preview_command: None,
@@ -122,7 +134,7 @@ impl App {
     }
 
     pub fn refresh_preview(&mut self) {
-        let command = selected_preview_command(self.state.selected());
+        let command = selected_preview_command(self.state.selected(), &self.config);
         if self.preview_command == command {
             return;
         }
@@ -198,12 +210,97 @@ impl App {
     }
 }
 
-fn selected_preview_command(candidate: Option<Candidate>) -> Option<String> {
+fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Option<String> {
     let candidate = candidate?;
-    let preview_command = candidate.preview_command()?.clone();
+    let preview_command = match candidate.source() {
+        CandidateSource::Generic => None,
+        CandidateSource::PathExecutable => Some(config.sources.path.preview_command.clone()),
+        CandidateSource::FilesystemPath => filesystem_preview_command(
+            candidate.value().editable_text(),
+            &config.sources.filesystem,
+        ),
+    }?;
+
     let mut queue = Queue::from_values([candidate.value().clone()]);
     queue.compose(preview_command);
     queue.status()
+}
+
+fn filesystem_preview_command(path: &str, config: &FilesystemSourceConfig) -> Option<Value> {
+    let path = Path::new(path);
+    let Ok(metadata) = fs::metadata(path) else {
+        return config.binary_preview_command.clone();
+    };
+
+    if metadata.is_dir() {
+        return config.directory_preview_command.clone();
+    }
+
+    if !metadata.is_file() {
+        return config.binary_preview_command.clone();
+    }
+
+    match filesystem_file_kind(path) {
+        FilesystemFileKind::Text => config.text_file_preview_command.clone(),
+        FilesystemFileKind::Document => config.document_preview_command.clone(),
+        FilesystemFileKind::Image => config.image_preview_command.clone(),
+        FilesystemFileKind::Archive => config.archive_preview_command.clone(),
+        FilesystemFileKind::Media => config.media_preview_command.clone(),
+        FilesystemFileKind::Binary => config.binary_preview_command.clone(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilesystemFileKind {
+    Text,
+    Document,
+    Image,
+    Archive,
+    Media,
+    Binary,
+}
+
+fn filesystem_file_kind(path: &Path) -> FilesystemFileKind {
+    if is_text_file(path) {
+        return FilesystemFileKind::Text;
+    }
+
+    match file_extension(path).as_deref() {
+        Some(
+            "pdf" | "ps" | "epub" | "djvu" | "doc" | "docx" | "odt" | "rtf" | "xls" | "xlsx"
+            | "ods" | "ppt" | "pptx" | "odp",
+        ) => FilesystemFileKind::Document,
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "avif" | "heic"
+            | "ico",
+        ) => FilesystemFileKind::Image,
+        Some(
+            "zip" | "tar" | "gz" | "tgz" | "bz2" | "tbz2" | "xz" | "txz" | "zst" | "7z" | "rar",
+        ) => FilesystemFileKind::Archive,
+        Some("mp3" | "flac" | "wav" | "ogg" | "m4a" | "mp4" | "mkv" | "webm" | "avi" | "mov") => {
+            FilesystemFileKind::Media
+        }
+        _ => FilesystemFileKind::Binary,
+    }
+}
+
+fn file_extension(path: &Path) -> Option<String> {
+    path.extension()?
+        .to_str()
+        .map(|extension| extension.to_lowercase())
+}
+
+fn is_text_file(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buffer = [0; 1024];
+    let Ok(bytes_read) = file.read(&mut buffer) else {
+        return false;
+    };
+    let bytes = &buffer[..bytes_read];
+
+    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
 
 impl Drop for App {
@@ -224,7 +321,7 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use crate::config::{Config, SourceConfig};
+    use crate::config::{Config, FilesystemSourceConfig, PathSourceConfig, SourceConfig};
     use crate::model::Candidate;
     use crate::sources::CandidateSender;
     use crate::state::InputMode;
@@ -294,6 +391,20 @@ mod tests {
             .map(|candidate| candidate.value().clone())
     }
 
+    fn preview_for_path(path: &std::path::Path, config: &Config) -> Option<String> {
+        selected_preview_command(
+            Some(
+                Candidate::new(
+                    Value::escaped(path.to_str().expect("path should be utf-8")),
+                    'f',
+                    None,
+                )
+                .with_source(CandidateSource::FilesystemPath),
+            ),
+            config,
+        )
+    }
+
     async fn receive_until_selected(app: &mut App) -> Value {
         while selected_value(app).is_none() {
             assert!(app.receive_candidates().await);
@@ -308,21 +419,116 @@ mod tests {
 
     #[tokio::test]
     async fn app_refreshes_preview_for_selected_candidate() {
-        let mut app = App::with_sources([Box::new(StaticSource::new([Candidate::new(
-            Value::escaped("/home/me/paper.pdf"),
-            'f',
-            None,
-        )
-        .with_preview_command(Some(Value::raw("printf 'paper preview'")))]))
-            as Box<dyn AsyncSource>]);
+        let mut app = App::with_sources_and_config(
+            [Box::new(StaticSource::new([Candidate::new(
+                Value::raw("paper"),
+                'c',
+                None,
+            )
+            .with_source(CandidateSource::PathExecutable)]))
+                as Box<dyn AsyncSource>],
+            Config {
+                sources: SourceConfig {
+                    path: PathSourceConfig {
+                        preview_command: Value::raw("printf 'paper preview'"),
+                        ..PathSourceConfig::default()
+                    },
+                    ..SourceConfig::default()
+                },
+            },
+        );
 
         assert!(app.receive_candidates().await);
-        app.update_input(Value::raw(";fpaper"));
+        app.update_input(Value::raw(";cpaper"));
         app.refresh_preview();
 
         assert_eq!(app.preview(), &Preview::Loading);
         assert!(app.receive_preview().await);
         assert_eq!(app.preview(), &Preview::Ready("paper preview".into()));
+    }
+
+    #[test]
+    fn filesystem_preview_command_is_selected_by_file_kind() {
+        let root = temp_app_dir("app-filesystem-preview-kind");
+        let directory = root.join("Documents");
+        let text = root.join("notes.txt");
+        let document = root.join("paper.pdf");
+        let image = root.join("photo.png");
+        let archive = root.join("backup.zip");
+        let media = root.join("song.mp3");
+        let binary = root.join("program.bin");
+        fs::create_dir(&directory).expect("test directory should be created");
+        fs::write(&text, b"plain text").expect("text file should be written");
+        fs::write(&document, b"%PDF\0").expect("document file should be written");
+        fs::write(&image, b"\x89PNG\r\n\x1a\n\0").expect("image file should be written");
+        fs::write(&archive, b"PK\x03\x04\0").expect("archive file should be written");
+        fs::write(&media, b"ID3\0").expect("media file should be written");
+        fs::write(&binary, b"\0binary").expect("binary file should be written");
+        let config = Config {
+            sources: SourceConfig {
+                filesystem: FilesystemSourceConfig {
+                    directory_preview_command: Some(Value::raw("preview-dir {}")),
+                    text_file_preview_command: Some(Value::raw("preview-text {}")),
+                    document_preview_command: Some(Value::raw("preview-document {}")),
+                    image_preview_command: Some(Value::raw("preview-image {}")),
+                    archive_preview_command: Some(Value::raw("preview-archive {}")),
+                    media_preview_command: Some(Value::raw("preview-media {}")),
+                    binary_preview_command: Some(Value::raw("preview-binary {}")),
+                    ..FilesystemSourceConfig::default()
+                },
+                ..SourceConfig::default()
+            },
+        };
+
+        assert_eq!(
+            preview_for_path(&directory, &config),
+            Some(format!(
+                "preview-dir '{}'",
+                directory.to_str().expect("path should be utf-8")
+            ))
+        );
+        assert_eq!(
+            preview_for_path(&text, &config),
+            Some(format!(
+                "preview-text '{}'",
+                text.to_str().expect("path should be utf-8")
+            ))
+        );
+        assert_eq!(
+            preview_for_path(&document, &config),
+            Some(format!(
+                "preview-document '{}'",
+                document.to_str().expect("path should be utf-8")
+            ))
+        );
+        assert_eq!(
+            preview_for_path(&image, &config),
+            Some(format!(
+                "preview-image '{}'",
+                image.to_str().expect("path should be utf-8")
+            ))
+        );
+        assert_eq!(
+            preview_for_path(&archive, &config),
+            Some(format!(
+                "preview-archive '{}'",
+                archive.to_str().expect("path should be utf-8")
+            ))
+        );
+        assert_eq!(
+            preview_for_path(&media, &config),
+            Some(format!(
+                "preview-media '{}'",
+                media.to_str().expect("path should be utf-8")
+            ))
+        );
+        assert_eq!(
+            preview_for_path(&binary, &config),
+            Some(format!(
+                "preview-binary '{}'",
+                binary.to_str().expect("path should be utf-8")
+            ))
+        );
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ pub async fn run(app: &mut App) -> io::Result<Option<Value>> {
     loop {
         let mut should_draw = app.receive_pending_candidates() > 0;
         should_draw |= app.receive_pending_preview();
+        tokio::task::yield_now().await;
 
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {

@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{FilesystemSourceConfig, PathSourceConfig};
-use crate::model::{Candidate, Value};
+use crate::model::{Candidate, CandidateSource, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -103,8 +102,7 @@ impl AsyncSource for FilesystemRoot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum FilesystemEntryKind {
     Directory,
-    TextFile,
-    BinaryFile,
+    File,
 }
 
 fn filesystem_paths_in_dir(
@@ -127,11 +125,7 @@ fn filesystem_paths_in_dir(
         };
 
         let kind = if file_type.is_file() {
-            if is_text_file(&path) {
-                FilesystemEntryKind::TextFile
-            } else {
-                FilesystemEntryKind::BinaryFile
-            }
+            FilesystemEntryKind::File
         } else if file_type.is_dir() {
             pending.push(path);
             FilesystemEntryKind::Directory
@@ -143,19 +137,6 @@ fn filesystem_paths_in_dir(
     }
 
     paths
-}
-
-fn is_text_file(path: &Path) -> bool {
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut buffer = [0; 1024];
-    let Ok(bytes_read) = file.read(&mut buffer) else {
-        return false;
-    };
-    let bytes = &buffer[..bytes_read];
-
-    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
 
 fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
@@ -189,21 +170,16 @@ fn is_executable_file(path: &Path) -> bool {
 
 fn executable_candidate(command: String, config: &PathSourceConfig) -> Candidate {
     Candidate::new(Value::raw(command), 'c', Some(config.direct_action.clone()))
-        .with_preview_command(Some(config.preview_command.clone()))
+        .with_source(CandidateSource::PathExecutable)
 }
 
 fn filesystem_candidate(
     entry: (String, FilesystemEntryKind),
     config: &FilesystemSourceConfig,
 ) -> Candidate {
-    let (path, match_char, preview_command) = match entry {
-        (path, FilesystemEntryKind::Directory) => {
-            (path, 'd', Some(config.directory_preview_command.clone()))
-        }
-        (path, FilesystemEntryKind::TextFile) => {
-            (path, 'f', Some(config.text_file_preview_command.clone()))
-        }
-        (path, FilesystemEntryKind::BinaryFile) => (path, 'f', None),
+    let (path, match_char) = match entry {
+        (path, FilesystemEntryKind::Directory) => (path, 'd'),
+        (path, FilesystemEntryKind::File) => (path, 'f'),
     };
 
     Candidate::new(
@@ -211,7 +187,7 @@ fn filesystem_candidate(
         match_char,
         Some(config.direct_action.clone()),
     )
-    .with_preview_command(preview_command)
+    .with_source(CandidateSource::FilesystemPath)
 }
 
 #[cfg(test)]
@@ -220,7 +196,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
 
-    use crate::model::{Candidate, Value};
+    use crate::model::{Candidate, CandidateSource, Value};
     use crate::sources::{AsyncSource, CandidateSender};
     use crate::state::LauncherState;
     use crate::test_support::{path_string, TempDir};
@@ -274,7 +250,7 @@ mod tests {
 
     fn expected_executable(command: &str) -> Candidate {
         Candidate::new(Value::raw(command), 'c', Some(Value::raw("{}")))
-            .with_preview_command(Some(Value::raw("man {}")))
+            .with_source(CandidateSource::PathExecutable)
     }
 
     fn expected_directory(path: &Path) -> Candidate {
@@ -283,7 +259,7 @@ mod tests {
             'd',
             Some(Value::raw("xdg-open {}")),
         )
-        .with_preview_command(Some(Value::raw("ls {}")))
+        .with_source(CandidateSource::FilesystemPath)
     }
 
     fn expected_text_file(path: &Path) -> Candidate {
@@ -292,7 +268,7 @@ mod tests {
             'f',
             Some(Value::raw("xdg-open {}")),
         )
-        .with_preview_command(Some(Value::raw("cat {}")))
+        .with_source(CandidateSource::FilesystemPath)
     }
 
     fn expected_binary_file(path: &Path) -> Candidate {
@@ -301,6 +277,7 @@ mod tests {
             'f',
             Some(Value::raw("xdg-open {}")),
         )
+        .with_source(CandidateSource::FilesystemPath)
     }
 
     fn filesystem_root(root: &Path) -> super::FilesystemRoot {
@@ -406,7 +383,7 @@ mod tests {
                 'c',
                 Some(Value::raw("run-command {}"))
             )
-            .with_preview_command(Some(Value::raw("help-command {}")))]
+            .with_source(CandidateSource::PathExecutable)]
         );
     }
 
@@ -561,7 +538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_source_does_not_preview_binary_files() {
+    async fn filesystem_source_returns_binary_files_as_escaped_candidates() {
         let root = temp_source_dir("filesystem-source-binary-file");
         let file = root.join("binary-file");
         fs::write(&file, b"\0binary").expect("test binary file should be written");
@@ -733,8 +710,6 @@ mod tests {
             root.path().to_path_buf(),
             FilesystemSourceConfig {
                 direct_action: Value::raw("open-path {}"),
-                directory_preview_command: Value::raw("list-path {}"),
-                text_file_preview_command: Value::raw("show-text {}"),
                 ..FilesystemSourceConfig::default()
             },
         )))
@@ -748,13 +723,13 @@ mod tests {
                     'd',
                     Some(Value::raw("open-path {}"))
                 )
-                .with_preview_command(Some(Value::raw("list-path {}"))),
+                .with_source(CandidateSource::FilesystemPath),
                 Candidate::new(
                     Value::escaped(file.to_str().expect("path should be utf-8")),
                     'f',
                     Some(Value::raw("open-path {}"))
                 )
-                .with_preview_command(Some(Value::raw("show-text {}"))),
+                .with_source(CandidateSource::FilesystemPath),
             ]
         );
     }
