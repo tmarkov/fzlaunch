@@ -120,13 +120,13 @@ impl LauncherState {
     }
 
     fn search_pattern(&self) -> Option<Pattern> {
-        let input = self.value.editable_text();
+        let input = search_needle(self.value.editable_text());
         if input.is_empty() {
             return None;
         }
 
         Some(Pattern::parse(
-            input,
+            &input,
             CaseMatching::Ignore,
             Normalization::Smart,
         ))
@@ -308,6 +308,10 @@ impl CandidateEntry {
 
 fn preference_score_adjustment(entry: &CandidateEntry) -> u64 {
     entry.candidate.preference_score_millis() as u64
+}
+
+fn search_needle(input: &str) -> String {
+    input.replace("{}", "")
 }
 
 fn rank_candidate(
@@ -1197,6 +1201,20 @@ mod tests {
         state.press_tab();
 
         assert_eq!(state.queue_status(), Some("mv {}".into()));
+    }
+
+    #[test]
+    fn slots_are_not_part_of_the_search_needle() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/mv {} notes.txt"), 'f', None),
+            Candidate::new(Value::raw("mv"), 'c', None),
+        ]);
+        state.update_input(Value::raw("mv {}"));
+
+        assert_eq!(selected_value(&state), Some(Value::raw("mv")));
+        assert_eq!(state.value(), Value::raw("mv {}"));
     }
 
     #[test]
