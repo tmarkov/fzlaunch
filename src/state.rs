@@ -6,6 +6,8 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 const SORTED_RESULT_PREFIX_LEN: usize = 100;
+const MATCH_SCORE_SCALE: u64 = 1_000;
+const MAX_LENGTH_SCORE_BIAS: u64 = MATCH_SCORE_SCALE - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -310,7 +312,7 @@ impl LauncherState {
 impl CandidateEntry {
     fn new(candidate: Candidate) -> Self {
         let haystack = format!(
-            ";{} {}",
+            ";{}/{}",
             candidate.selector(),
             candidate.value().editable_text()
         );
@@ -338,8 +340,9 @@ fn rank_candidate(
             let mut indices = Vec::new();
             let score =
                 pattern.indices(Utf32Str::new(&entry.haystack, buf), matcher, &mut indices)? as u64
-                    * 1_000
-                    + preference_score_adjustment(entry);
+                    * MATCH_SCORE_SCALE
+                    + preference_score_adjustment(entry)
+                    + length_score_adjustment(entry);
             indices.sort_unstable();
             indices.dedup();
             (
@@ -358,6 +361,11 @@ fn rank_candidate(
             match_indices,
         },
     })
+}
+
+fn length_score_adjustment(entry: &CandidateEntry) -> u64 {
+    MAX_LENGTH_SCORE_BIAS
+        .saturating_sub(entry.candidate.value().editable_text().chars().count() as u64)
 }
 
 fn merge_ranked_results(
@@ -519,11 +527,11 @@ mod tests {
             state.results(),
             vec![
                 ResultRow {
-                    haystack: ";c firefox".to_string(),
+                    haystack: ";c/firefox".to_string(),
                     match_indices: Vec::new(),
                 },
                 ResultRow {
-                    haystack: ";f /home/me/paper.pdf".to_string(),
+                    haystack: ";f//home/me/paper.pdf".to_string(),
                     match_indices: Vec::new(),
                 }
             ]
@@ -544,7 +552,7 @@ mod tests {
         assert_eq!(
             state.results(),
             vec![ResultRow {
-                haystack: ";f /home/me/paper.pdf".to_string(),
+                haystack: ";f//home/me/paper.pdf".to_string(),
                 match_indices: vec![12, 13, 14, 15, 16],
             }]
         );
@@ -684,6 +692,60 @@ mod tests {
     }
 
     #[test]
+    fn shorter_candidate_wins_when_match_scores_are_equal() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("cats"), 'c', None),
+            Candidate::new(Value::raw("cat"), 'c', None),
+        ]);
+        state.update_input(Value::raw("cat"));
+
+        assert_eq!(selected_value(&state), Some(Value::raw("cat")));
+    }
+
+    #[test]
+    fn exact_command_segment_wins_over_longer_path_segment() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("tmp/cat"), 'c', None),
+            Candidate::new(Value::raw("cat"), 'c', None),
+        ]);
+        state.update_input(Value::raw("cat"));
+
+        assert_eq!(selected_value(&state), Some(Value::raw("cat")));
+    }
+
+    #[test]
+    fn results_use_path_delimiter_for_matching_haystack() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("cat"), 'c', None)]);
+        state.update_input(Value::raw("cat"));
+
+        assert_eq!(
+            state.results(),
+            vec![ResultRow {
+                haystack: ";c/cat".to_string(),
+                match_indices: vec![3, 4, 5],
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_input_keeps_unpreferred_candidates_in_source_order() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("much-longer"), 'c', None),
+            Candidate::new(Value::raw("a"), 'c', None),
+        ]);
+
+        assert_eq!(selected_value(&state), Some(Value::raw("much-longer")));
+    }
+
+    #[test]
     fn preference_score_breaks_fuzzy_score_ties() {
         let mut state = LauncherState::default();
 
@@ -760,11 +822,11 @@ mod tests {
             state.results(),
             vec![
                 ResultRow {
-                    haystack: ";c first".to_string(),
+                    haystack: ";c/first".to_string(),
                     match_indices: Vec::new(),
                 },
                 ResultRow {
-                    haystack: ";c second".to_string(),
+                    haystack: ";c/second".to_string(),
                     match_indices: Vec::new(),
                 },
             ]

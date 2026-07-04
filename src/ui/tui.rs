@@ -312,7 +312,8 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
 }
 
 fn result_line(row: ResultRow, max_width: usize) -> Line<'static> {
-    let chars = truncate_middle(&row.haystack, max_width);
+    let display_haystack = display_result_haystack(&row.haystack);
+    let chars = truncate_middle(&display_haystack, max_width);
     let mut spans = Vec::new();
     let mut text = String::new();
     let mut highlighted = None;
@@ -340,6 +341,14 @@ fn result_line(row: ResultRow, max_width: usize) -> Line<'static> {
     }
 
     Line::from(spans)
+}
+
+fn display_result_haystack(haystack: &str) -> String {
+    let mut display = haystack.to_string();
+    if display.starts_with(';') {
+        display.replace_range(2..3, " ");
+    }
+    display
 }
 
 fn result_row_width(area: Rect, has_selection: bool) -> usize {
@@ -396,7 +405,7 @@ fn truncate_middle(text: &str, max_width: usize) -> Vec<DisplayChar> {
 
     let prefix_len = text
         .find(' ')
-        .map(|space| text[..=space].chars().count())
+        .map(|delimiter| text[..=delimiter].chars().count())
         .unwrap_or(0)
         .min(max_width.saturating_sub(3));
     let suffix_len = max_width - prefix_len - 3;
@@ -507,7 +516,7 @@ mod tests {
     fn result_line_highlights_matched_characters() {
         let line = result_line(
             ResultRow {
-                haystack: ";f /home/me/paper.pdf".to_string(),
+                haystack: ";f//home/me/paper.pdf".to_string(),
                 match_indices: vec![12, 13, 14, 15, 16],
             },
             80,
@@ -521,6 +530,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(highlighted, vec!["paper"]);
+    }
+
+    #[test]
+    fn result_line_displays_space_delimiter() {
+        let line = result_line(
+            ResultRow {
+                haystack: ";c/bash".to_string(),
+                match_indices: Vec::new(),
+            },
+            80,
+        );
+
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, ";c bash");
     }
 
     #[test]
