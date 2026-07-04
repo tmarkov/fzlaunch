@@ -85,7 +85,7 @@ impl LauncherState {
 
         new_results.sort_by_key(|result| Reverse(result.score));
         self.results = merge_ranked_results(std::mem::take(&mut self.results), new_results);
-        if !self.results.is_empty() {
+        if self.selected_index.is_none() && !self.results.is_empty() {
             self.selected_index = Some(0);
         }
     }
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn feeding_new_candidates_resets_selection_to_first_match() {
+    fn feeding_new_candidates_preserves_selection_index() {
         let mut state = LauncherState::default();
 
         state.feed([
@@ -562,11 +562,11 @@ mod tests {
         assert_eq!(selected_value(&state), Some(Value::raw("second")));
 
         state.feed([
-            Candidate::new(Value::raw("new-first"), 'c', None),
+            Candidate::new(Value::raw("new-first"), 'c', None).with_preference_score(10),
             Candidate::new(Value::raw("new-second"), 'c', None),
         ]);
 
-        assert_eq!(selected_value(&state), Some(Value::raw("first")));
+        assert_eq!(state.selected_index(), Some(1));
     }
 
     #[test]
