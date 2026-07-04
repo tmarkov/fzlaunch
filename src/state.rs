@@ -1,3 +1,6 @@
+use std::cmp::Reverse;
+
+use crate::history::edited_history_candidate;
 use crate::model::{Candidate, Queue, Value};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -22,6 +25,7 @@ pub struct LauncherState {
     results: Vec<RankedCandidate>,
     selected_index: Option<usize>,
     queue: Queue,
+    edit_origin: Option<Candidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +60,25 @@ impl Default for LauncherState {
             results: Vec::new(),
             selected_index: None,
             queue: Queue::new(),
+            edit_origin: None,
         }
     }
 }
 
 impl LauncherState {
     pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
-        self.candidates
-            .extend(candidates.into_iter().map(CandidateEntry::new));
+        for candidate in candidates {
+            let entry = CandidateEntry::new(candidate);
+            let index = self
+                .candidates
+                .iter()
+                .position(|existing| {
+                    existing.candidate.preference_score_millis()
+                        < entry.candidate.preference_score_millis()
+                })
+                .unwrap_or(self.candidates.len());
+            self.candidates.insert(index, entry);
+        }
         self.rerank();
     }
 
@@ -72,6 +87,7 @@ impl LauncherState {
             if let Some(left_brace_index) = value.editable_text().find('{') {
                 let prefix = value.with_editable_text(&value.editable_text()[..left_brace_index]);
                 let suffix = value.editable_text()[left_brace_index..].to_string();
+                let edit_origin = self.selected();
 
                 self.value = prefix;
                 self.rerank();
@@ -79,6 +95,7 @@ impl LauncherState {
                 self.mode = InputMode::Edit;
                 self.results.clear();
                 self.selected_index = None;
+                self.edit_origin = edit_origin;
                 self.value.edit_text(|text| text.push_str(&suffix));
                 return;
             }
@@ -88,6 +105,8 @@ impl LauncherState {
 
         if self.mode == InputMode::Search {
             self.rerank();
+        } else if self.value.editable_text().is_empty() {
+            self.edit_origin = None;
         }
     }
 
@@ -121,8 +140,18 @@ impl LauncherState {
                 Normalization::Smart,
             );
 
-            self.results = pattern
+            let mut results = pattern
                 .match_list(indexed_haystacks, &mut matcher)
+                .into_iter()
+                .map(|(matched, score)| {
+                    let adjusted_score = score as u64 * 1_000
+                        + preference_score_adjustment(&self.candidates[matched.index]);
+                    (matched, adjusted_score)
+                })
+                .collect::<Vec<_>>();
+            results.sort_by_key(|(_, adjusted_score)| Reverse(*adjusted_score));
+
+            self.results = results
                 .into_iter()
                 .map(|(matched, _)| RankedCandidate {
                     index: matched.index,
@@ -158,6 +187,11 @@ impl LauncherState {
     }
 
     pub fn press_tilde(&mut self) {
+        let edit_origin = if self.value.editable_text().is_empty() {
+            None
+        } else {
+            self.selected()
+        };
         let value = if self.value.editable_text().is_empty() {
             Value::raw("")
         } else {
@@ -168,6 +202,7 @@ impl LauncherState {
         self.value = value;
         self.results.clear();
         self.selected_index = None;
+        self.edit_origin = edit_origin;
     }
 
     pub fn press_tab(&mut self) {
@@ -240,6 +275,26 @@ impl LauncherState {
         self.selected_entry().map(|entry| entry.candidate.clone())
     }
 
+    pub(crate) fn history_candidate(&self) -> Option<Candidate> {
+        let current = self.current();
+        if current.editable_text().is_empty() {
+            return None;
+        }
+
+        if self.mode == InputMode::Edit {
+            return self
+                .edit_origin
+                .as_ref()
+                .map(|origin| edited_history_candidate(current, origin));
+        }
+
+        match self.selected() {
+            Some(selected) if selected.value() == &current => Some(selected),
+            Some(selected) => Some(edited_history_candidate(current, &selected)),
+            None => None,
+        }
+    }
+
     pub fn results(&self) -> Vec<ResultRow> {
         self.results
             .iter()
@@ -254,6 +309,7 @@ impl LauncherState {
     fn reset_input(&mut self) {
         self.mode = InputMode::Search;
         self.value = Value::raw("");
+        self.edit_origin = None;
         self.rerank();
     }
 
@@ -282,6 +338,10 @@ impl CandidateEntry {
             haystack,
         }
     }
+}
+
+fn preference_score_adjustment(entry: &CandidateEntry) -> u64 {
+    entry.candidate.preference_score_millis() as u64
 }
 
 fn match_indices(pattern: &Pattern, haystack: &str, matcher: &mut Matcher) -> Vec<usize> {
@@ -566,6 +626,47 @@ mod tests {
             selected_value(&state),
             Some(Value::escaped("/home/user/files/paper.pdf"))
         );
+    }
+
+    #[test]
+    fn preference_score_breaks_fuzzy_score_ties() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("bar"), 'c', None),
+            Candidate::new(Value::raw("baz"), 'c', None),
+            Candidate::new(Value::raw("bash"), 'c', None).with_preference_score(10),
+        ]);
+        state.update_input(Value::raw("ba"));
+
+        assert_eq!(selected_value(&state), Some(Value::raw("bash")));
+    }
+
+    #[test]
+    fn preference_score_can_overcome_small_fuzzy_score_differences() {
+        let mut state = LauncherState::default();
+        let noisy_path = "/home/todor/dev/fzlaunch/target/debug/incremental/fzlaunch-0r0jvnbum6sdj/s-hk317rysej-1nuonkh-evg95m50mdruu5xt7489zborz/baaoui0l7egf4cmlwezbrha5f.o";
+
+        state.feed([
+            Candidate::new(Value::escaped(noisy_path), 'f', None),
+            Candidate::new(Value::raw("bash"), 'c', None).with_preference_score(10),
+        ]);
+        state.update_input(Value::raw("ba"));
+
+        assert_eq!(selected_value(&state), Some(Value::raw("bash")));
+    }
+
+    #[test]
+    fn later_high_preference_candidates_are_inserted_into_base_order() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::raw("bar"), 'c', None),
+            Candidate::new(Value::raw("baz"), 'c', None),
+        ]);
+        state.feed([Candidate::new(Value::raw("bash"), 'c', None).with_preference_score(10)]);
+
+        assert_eq!(selected_value(&state), Some(Value::raw("bash")));
     }
 
     #[test]

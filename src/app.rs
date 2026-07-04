@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, FilesystemSourceConfig};
+use crate::history::History;
 use crate::model::{Candidate, CandidateSource, Queue, Value};
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
@@ -16,6 +17,7 @@ const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
 pub struct App {
     state: LauncherState,
     config: Config,
+    history: History,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
     preview_command: Option<String>,
@@ -34,12 +36,13 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let path = std::env::var("PATH").unwrap_or_default();
     let config = Config::load()?;
+    let history = History::load()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
 
     if let Some(command) = runtime.block_on(async {
-        let mut app = App::start_with_config(cwd, &path, config);
+        let mut app = App::start_with_config_and_history(cwd, &path, config, history);
         tui::run(&mut app).await
     })? {
         println!("{}", shell::render_value(&command));
@@ -54,7 +57,17 @@ impl App {
         Self::start_with_config(cwd, path, Config::default())
     }
 
+    #[cfg(test)]
     pub fn start_with_config(cwd: PathBuf, path: &str, config: Config) -> Self {
+        Self::start_with_config_and_history(cwd, path, config, History::default())
+    }
+
+    fn start_with_config_and_history(
+        cwd: PathBuf,
+        path: &str,
+        config: Config,
+        history: History,
+    ) -> Self {
         let mut sources = Vec::new();
 
         if config.sources.filesystem.enabled {
@@ -71,7 +84,7 @@ impl App {
             )) as Box<dyn AsyncSource>);
         }
 
-        Self::with_sources_and_config(sources, config)
+        Self::with_sources_and_config_and_history(sources, config, history)
     }
 
     #[cfg(test)]
@@ -79,9 +92,18 @@ impl App {
         Self::with_sources_and_config(sources, Config::default())
     }
 
+    #[cfg(test)]
     fn with_sources_and_config(
         sources: impl IntoIterator<Item = Box<dyn AsyncSource>>,
         config: Config,
+    ) -> Self {
+        Self::with_sources_and_config_and_history(sources, config, History::default())
+    }
+
+    fn with_sources_and_config_and_history(
+        sources: impl IntoIterator<Item = Box<dyn AsyncSource>>,
+        config: Config,
+        history: History,
     ) -> Self {
         let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
         let (preview_sender, preview_receiver) = tokio::sync::mpsc::channel(8);
@@ -92,10 +114,13 @@ impl App {
 
         drop(sender);
         let preview_runner = PreviewRunner::new(preview_sender);
+        let mut state = LauncherState::default();
+        state.feed(history.candidates());
 
         Self {
-            state: LauncherState::default(),
+            state,
             config,
+            history,
             candidate_receiver,
             source_tasks,
             preview_command: None,
@@ -122,10 +147,12 @@ impl App {
     }
 
     pub fn press_tab(&mut self) {
+        self.record_history_choice();
         self.state.press_tab();
     }
 
     pub fn press_enter(&mut self) -> Option<Value> {
+        self.record_history_choice();
         self.state.press_enter()
     }
 
@@ -169,7 +196,7 @@ impl App {
             return false;
         };
 
-        self.state.feed(candidates);
+        self.feed_candidates(candidates);
         true
     }
 
@@ -179,7 +206,7 @@ impl App {
         loop {
             match self.candidate_receiver.try_recv() {
                 Ok(candidates) => {
-                    self.state.feed(candidates);
+                    self.feed_candidates(candidates);
                     batches += 1;
                 }
                 Err(TryRecvError::Empty) => return batches,
@@ -208,6 +235,21 @@ impl App {
         self.preview = preview.preview;
         true
     }
+
+    fn feed_candidates(&mut self, candidates: Vec<Candidate>) {
+        let candidates = candidates
+            .into_iter()
+            .map(|candidate| self.history.apply_preference(candidate));
+        self.state.feed(candidates);
+    }
+
+    fn record_history_choice(&mut self) {
+        let Some(candidate) = self.state.history_candidate() else {
+            return;
+        };
+
+        let _ = self.history.record(&candidate);
+    }
 }
 
 fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Option<String> {
@@ -219,6 +261,7 @@ fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Op
             candidate.value().editable_text(),
             &config.sources.filesystem,
         ),
+        CandidateSource::History => None,
     }?;
 
     let mut queue = Queue::from_values([candidate.value().clone()]);
@@ -565,6 +608,59 @@ mod tests {
             app.press_enter(),
             Some(Value::raw("nvim '/home/me/paper.pdf'"))
         );
+    }
+
+    #[tokio::test]
+    async fn app_records_selected_choices_on_tab_and_enter() {
+        let root = temp_app_dir("app-history-record");
+        let path = root.join("history.tsv");
+        let bash = Candidate::new(Value::raw("bash"), 'c', Some(Value::raw("{}")))
+            .with_source(CandidateSource::PathExecutable);
+        let zsh = Candidate::new(Value::raw("zsh"), 'c', Some(Value::raw("{}")))
+            .with_source(CandidateSource::PathExecutable);
+        let mut app = App::with_sources_and_config_and_history(
+            [Box::new(StaticSource::new([bash.clone(), zsh.clone()])) as Box<dyn AsyncSource>],
+            Config::default(),
+            History::load_from_path(&path).expect("history should load"),
+        );
+
+        assert!(app.receive_candidates().await);
+        app.update_input(Value::raw(";cbash"));
+        app.press_tab();
+        app.update_input(Value::raw(";czsh"));
+        let _ = app.press_enter();
+
+        let history = History::load_from_path(&path).expect("history should reload");
+        assert!(history.score(&bash) > 0);
+        assert!(history.score(&zsh) > 0);
+    }
+
+    #[tokio::test]
+    async fn app_saves_edited_choices_as_future_history_candidates() {
+        let root = temp_app_dir("app-history-edited");
+        let path = root.join("history.tsv");
+        let mv = Candidate::new(Value::raw("mv"), 'c', Some(Value::raw("{}")))
+            .with_source(CandidateSource::PathExecutable);
+        let mut app = App::with_sources_and_config_and_history(
+            [Box::new(StaticSource::new([mv])) as Box<dyn AsyncSource>],
+            Config::default(),
+            History::load_from_path(&path).expect("history should load"),
+        );
+
+        assert!(app.receive_candidates().await);
+        app.update_input(Value::raw(";cmv"));
+        app.press_tilde();
+        app.update_input(Value::raw("mv {} {}"));
+        app.press_tab();
+
+        let mut app = App::with_sources_and_config_and_history(
+            Vec::<Box<dyn AsyncSource>>::new(),
+            Config::default(),
+            History::load_from_path(&path).expect("history should reload"),
+        );
+        app.update_input(Value::raw(";cmv"));
+
+        assert_eq!(selected_value(&app), Some(Value::raw("mv {} {}")));
     }
 
     #[tokio::test(start_paused = true)]

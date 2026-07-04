@@ -18,6 +18,7 @@ pub struct Candidate {
     selector: char,
     direct_action: Option<Value>,
     source: CandidateSource,
+    preference_score_millis: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub enum CandidateSource {
     Generic,
     PathExecutable,
     FilesystemPath,
+    History,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -169,11 +171,23 @@ impl Candidate {
             selector,
             direct_action,
             source: CandidateSource::Generic,
+            preference_score_millis: 0,
         }
     }
 
     pub fn with_source(mut self, source: CandidateSource) -> Self {
         self.source = source;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_preference_score(mut self, preference_score: u32) -> Self {
+        self.preference_score_millis = preference_score.saturating_mul(1_000);
+        self
+    }
+
+    pub(crate) fn with_preference_score_millis(mut self, preference_score_millis: u32) -> Self {
+        self.preference_score_millis = preference_score_millis;
         self
     }
 
@@ -191,6 +205,10 @@ impl Candidate {
 
     pub(crate) fn source(&self) -> CandidateSource {
         self.source
+    }
+
+    pub(crate) fn preference_score_millis(&self) -> u32 {
+        self.preference_score_millis
     }
 }
 
