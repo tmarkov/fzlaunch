@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -77,10 +77,12 @@ impl FilesystemRoot {
     }
 
     fn stream_candidate_batches(&self, sender: CandidateSender) {
-        let mut pending = vec![self.root.clone()];
+        let mut pending = VecDeque::from([self.root.clone()]);
 
-        while let Some(dir) = pending.pop() {
-            let candidates = filesystem_paths_in_dir(dir, &mut pending)
+        while let Some(dir) = pending.pop_front() {
+            let entries = filesystem_paths_in_dir(dir);
+            pending.extend(entries.iter().filter_map(filesystem_directory_path));
+            let candidates = entries
                 .into_iter()
                 .map(|entry| filesystem_candidate(entry, &self.config))
                 .collect::<Vec<_>>();
@@ -105,10 +107,7 @@ enum FilesystemEntryKind {
     File,
 }
 
-fn filesystem_paths_in_dir(
-    dir: PathBuf,
-    pending: &mut Vec<PathBuf>,
-) -> BTreeSet<(String, FilesystemEntryKind)> {
+fn filesystem_paths_in_dir(dir: PathBuf) -> BTreeSet<(String, FilesystemEntryKind)> {
     let mut paths = BTreeSet::new();
     let Ok(entries) = fs::read_dir(dir) else {
         return paths;
@@ -127,7 +126,6 @@ fn filesystem_paths_in_dir(
         let kind = if file_type.is_file() {
             FilesystemEntryKind::File
         } else if file_type.is_dir() {
-            pending.push(path);
             FilesystemEntryKind::Directory
         } else {
             continue;
@@ -137,6 +135,11 @@ fn filesystem_paths_in_dir(
     }
 
     paths
+}
+
+fn filesystem_directory_path(entry: &(String, FilesystemEntryKind)) -> Option<PathBuf> {
+    let (path, kind) = entry;
+    (*kind == FilesystemEntryKind::Directory).then(|| PathBuf::from(path))
 }
 
 fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
@@ -575,6 +578,49 @@ mod tests {
             .await
             .expect("filesystem source should emit nested batch");
         assert_eq!(remaining, vec![expected_text_file(&second)]);
+
+        task.await.expect("filesystem source task should finish");
+    }
+
+    #[tokio::test]
+    async fn async_filesystem_source_emits_batches_breadth_first() {
+        let root = temp_source_dir("filesystem-source-bfs");
+        let first_dir = root.join("a-first");
+        let second_dir = root.join("b-second");
+        let first_file = first_dir.join("first.txt");
+        let second_file = second_dir.join("second.txt");
+        fs::create_dir(&first_dir).expect("first directory should be created");
+        fs::create_dir(&second_dir).expect("second directory should be created");
+        fs::write(&first_file, b"first").expect("first file should be written");
+        fs::write(&second_file, b"second").expect("second file should be written");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+
+        let task = Box::new(filesystem_root(root.path())).stream_candidates(sender);
+
+        assert_eq!(
+            receiver
+                .recv()
+                .await
+                .expect("filesystem source should emit root batch"),
+            vec![
+                expected_directory(&first_dir),
+                expected_directory(&second_dir)
+            ]
+        );
+        assert_eq!(
+            receiver
+                .recv()
+                .await
+                .expect("filesystem source should emit first child batch"),
+            vec![expected_text_file(&first_file)]
+        );
+        assert_eq!(
+            receiver
+                .recv()
+                .await
+                .expect("filesystem source should emit second child batch"),
+            vec![expected_text_file(&second_file)]
+        );
 
         task.await.expect("filesystem source task should finish");
     }
