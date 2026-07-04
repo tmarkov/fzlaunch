@@ -133,13 +133,6 @@ impl Value {
         self.insertion_policy
     }
 
-    pub fn with_editable_text(&self, editable_text: impl Into<String>) -> Self {
-        Self {
-            editable_text: editable_text.into(),
-            insertion_policy: self.insertion_policy,
-        }
-    }
-
     pub fn edit_text(&mut self, update: impl FnOnce(&mut String)) {
         update(&mut self.editable_text);
     }

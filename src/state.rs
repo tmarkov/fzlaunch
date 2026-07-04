@@ -93,24 +93,6 @@ impl LauncherState {
     }
 
     pub fn update_input(&mut self, value: Value) {
-        if self.mode == InputMode::Search {
-            if let Some(left_brace_index) = value.editable_text().find('{') {
-                let prefix = value.with_editable_text(&value.editable_text()[..left_brace_index]);
-                let suffix = value.editable_text()[left_brace_index..].to_string();
-                let edit_origin = self.selected();
-
-                self.value = prefix;
-                self.rerank();
-                self.value = self.current();
-                self.mode = InputMode::Edit;
-                self.results.clear();
-                self.selected_index = None;
-                self.edit_origin = edit_origin;
-                self.value.edit_text(|text| text.push_str(&suffix));
-                return;
-            }
-        }
-
         self.value = value;
 
         if self.mode == InputMode::Search {
@@ -911,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn left_brace_in_search_mode_enters_edit_mode_from_current_value() {
+    fn left_brace_in_search_mode_updates_search_input() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
@@ -919,9 +901,9 @@ mod tests {
 
         state.update_input(Value::raw("mv {"));
 
-        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw("mv {"));
-        assert_eq!(selected_value(&state), None);
+        assert_eq!(state.current(), Value::raw("mv {"));
     }
 
     #[test]
@@ -1203,16 +1185,18 @@ mod tests {
     }
 
     #[test]
-    fn left_brace_shortcut_preserves_slot_text() {
+    fn slot_text_in_search_mode_can_be_queued() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
         state.update_input(Value::raw("mv "));
         state.update_input(Value::raw("mv {}"));
 
-        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.mode(), InputMode::Search);
         assert_eq!(state.value(), Value::raw("mv {}"));
-        assert_eq!(selected_value(&state), None);
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), Some("mv {}".into()));
     }
 
     #[test]
