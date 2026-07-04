@@ -5,6 +5,8 @@ use crate::model::{Candidate, Queue, Value};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+const SORTED_RESULT_PREFIX_LEN: usize = 100;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Search,
@@ -37,18 +39,8 @@ struct CandidateEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RankedCandidate {
     index: usize,
+    score: u64,
     row: ResultRow,
-}
-
-struct IndexedHaystack {
-    index: usize,
-    haystack: String,
-}
-
-impl AsRef<str> for IndexedHaystack {
-    fn as_ref(&self) -> &str {
-        &self.haystack
-    }
 }
 
 impl Default for LauncherState {
@@ -67,19 +59,35 @@ impl Default for LauncherState {
 
 impl LauncherState {
     pub fn feed(&mut self, candidates: impl IntoIterator<Item = Candidate>) {
+        let pattern = self.search_pattern();
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut buf = Vec::new();
+        let mut new_results = Vec::new();
+
         for candidate in candidates {
             let entry = CandidateEntry::new(candidate);
-            let index = self
-                .candidates
-                .iter()
-                .position(|existing| {
-                    existing.candidate.preference_score_millis()
-                        < entry.candidate.preference_score_millis()
-                })
-                .unwrap_or(self.candidates.len());
-            self.candidates.insert(index, entry);
+            let index = self.candidates.len();
+
+            if self.mode == InputMode::Search {
+                if let Some(result) =
+                    rank_candidate(index, &entry, pattern.as_ref(), &mut matcher, &mut buf)
+                {
+                    new_results.push(result);
+                }
+            }
+
+            self.candidates.push(entry);
         }
-        self.rerank();
+
+        if new_results.is_empty() {
+            return;
+        }
+
+        new_results.sort_by_key(|result| Reverse(result.score));
+        self.results = merge_ranked_results(std::mem::take(&mut self.results), new_results);
+        if !self.results.is_empty() {
+            self.selected_index = Some(0);
+        }
     }
 
     pub fn update_input(&mut self, value: Value) {
@@ -111,59 +119,33 @@ impl LauncherState {
     }
 
     fn rerank(&mut self) {
-        if self.value.editable_text().is_empty() {
-            self.results = self
-                .candidates
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| RankedCandidate {
-                    index,
-                    row: ResultRow {
-                        haystack: entry.haystack.clone(),
-                        match_indices: Vec::new(),
-                    },
-                })
-                .collect();
-        } else {
-            let indexed_haystacks =
-                self.candidates
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| IndexedHaystack {
-                        index,
-                        haystack: entry.haystack.clone(),
-                    });
-            let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-            let pattern = Pattern::parse(
-                self.value.editable_text(),
-                CaseMatching::Ignore,
-                Normalization::Smart,
-            );
-
-            let mut results = pattern
-                .match_list(indexed_haystacks, &mut matcher)
-                .into_iter()
-                .map(|(matched, score)| {
-                    let adjusted_score = score as u64 * 1_000
-                        + preference_score_adjustment(&self.candidates[matched.index]);
-                    (matched, adjusted_score)
-                })
-                .collect::<Vec<_>>();
-            results.sort_by_key(|(_, adjusted_score)| Reverse(*adjusted_score));
-
-            self.results = results
-                .into_iter()
-                .map(|(matched, _)| RankedCandidate {
-                    index: matched.index,
-                    row: ResultRow {
-                        match_indices: match_indices(&pattern, &matched.haystack, &mut matcher),
-                        haystack: matched.haystack,
-                    },
-                })
-                .collect();
-        }
+        let pattern = self.search_pattern();
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut buf = Vec::new();
+        self.results = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                rank_candidate(index, entry, pattern.as_ref(), &mut matcher, &mut buf)
+            })
+            .collect();
+        self.results.sort_by_key(|result| Reverse(result.score));
 
         self.selected_index = (!self.results.is_empty()).then_some(0);
+    }
+
+    fn search_pattern(&self) -> Option<Pattern> {
+        let input = self.value.editable_text();
+        if input.is_empty() {
+            return None;
+        }
+
+        Some(Pattern::parse(
+            input,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+        ))
     }
 
     pub fn select_next(&mut self) {
@@ -344,14 +326,74 @@ fn preference_score_adjustment(entry: &CandidateEntry) -> u64 {
     entry.candidate.preference_score_millis() as u64
 }
 
-fn match_indices(pattern: &Pattern, haystack: &str, matcher: &mut Matcher) -> Vec<usize> {
-    let mut buf = Vec::new();
-    let mut indices = Vec::new();
+fn rank_candidate(
+    index: usize,
+    entry: &CandidateEntry,
+    pattern: Option<&Pattern>,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+) -> Option<RankedCandidate> {
+    let (score, match_indices) = match pattern {
+        Some(pattern) => {
+            let mut indices = Vec::new();
+            let score =
+                pattern.indices(Utf32Str::new(&entry.haystack, buf), matcher, &mut indices)? as u64
+                    * 1_000
+                    + preference_score_adjustment(entry);
+            indices.sort_unstable();
+            indices.dedup();
+            (
+                score,
+                indices.into_iter().map(|index| index as usize).collect(),
+            )
+        }
+        None => (preference_score_adjustment(entry), Vec::new()),
+    };
 
-    let _ = pattern.indices(Utf32Str::new(haystack, &mut buf), matcher, &mut indices);
-    indices.sort_unstable();
-    indices.dedup();
-    indices.into_iter().map(|index| index as usize).collect()
+    Some(RankedCandidate {
+        index,
+        score,
+        row: ResultRow {
+            haystack: entry.haystack.clone(),
+            match_indices,
+        },
+    })
+}
+
+fn merge_ranked_results(
+    existing: Vec<RankedCandidate>,
+    incoming: Vec<RankedCandidate>,
+) -> Vec<RankedCandidate> {
+    let prefix_len = existing.len().min(SORTED_RESULT_PREFIX_LEN);
+    let mut existing = existing.into_iter();
+    let existing_prefix = existing.by_ref().take(prefix_len).collect::<Vec<_>>();
+    let existing_tail = existing.collect::<Vec<_>>();
+    let mut existing_prefix = existing_prefix.into_iter().peekable();
+    let mut incoming = incoming.into_iter().peekable();
+    let mut merged = Vec::new();
+
+    while merged.len() < SORTED_RESULT_PREFIX_LEN {
+        match (existing_prefix.peek(), incoming.peek()) {
+            (Some(existing), Some(new)) if existing.score >= new.score => {
+                merged.push(existing_prefix.next().expect("peeked existing result"));
+            }
+            (Some(_), Some(_)) => {
+                merged.push(incoming.next().expect("peeked incoming result"));
+            }
+            (Some(_), None) => {
+                merged.push(existing_prefix.next().expect("peeked existing result"));
+            }
+            (None, Some(_)) => {
+                merged.push(incoming.next().expect("peeked incoming result"));
+            }
+            (None, None) => break,
+        }
+    }
+
+    merged.extend(existing_prefix);
+    merged.extend(incoming);
+    merged.extend(existing_tail);
+    merged
 }
 
 #[cfg(test)]
@@ -629,6 +671,19 @@ mod tests {
     }
 
     #[test]
+    fn feed_can_promote_new_matches_after_many_existing_matches() {
+        let mut state = LauncherState::default();
+
+        state.update_input(Value::raw(";c item"));
+        state.feed(
+            (0..150).map(|index| Candidate::new(Value::raw(format!("item-{index:03}")), 'c', None)),
+        );
+        state.feed([Candidate::new(Value::raw("item-999"), 'c', None).with_preference_score(10)]);
+
+        assert_eq!(selected_value(&state), Some(Value::raw("item-999")));
+    }
+
+    #[test]
     fn preference_score_breaks_fuzzy_score_ties() {
         let mut state = LauncherState::default();
 
@@ -692,6 +747,29 @@ mod tests {
         state.update_input(Value::raw(";c"));
 
         assert_eq!(selected_value(&state), Some(Value::raw("calculator")));
+    }
+
+    #[test]
+    fn feeding_unpreferred_candidates_with_empty_input_appends_results() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("first"), 'c', None)]);
+        state.feed([Candidate::new(Value::raw("second"), 'c', None)]);
+
+        assert_eq!(
+            state.results(),
+            vec![
+                ResultRow {
+                    haystack: ";c first".to_string(),
+                    match_indices: Vec::new(),
+                },
+                ResultRow {
+                    haystack: ";c second".to_string(),
+                    match_indices: Vec::new(),
+                },
+            ]
+        );
+        assert_eq!(selected_value(&state), Some(Value::raw("first")));
     }
 
     #[test]

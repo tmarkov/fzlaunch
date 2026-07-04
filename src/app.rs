@@ -13,6 +13,7 @@ use crate::ui::tui;
 use tokio::sync::mpsc::error::TryRecvError;
 
 const CANDIDATE_CHANNEL_CAPACITY: usize = 128;
+const MAX_CANDIDATE_BATCHES_PER_TICK: usize = 8;
 
 pub struct App {
     state: LauncherState,
@@ -202,17 +203,24 @@ impl App {
 
     pub fn receive_pending_candidates(&mut self) -> usize {
         let mut batches = 0;
+        let mut candidates = Vec::new();
 
-        loop {
+        while batches < MAX_CANDIDATE_BATCHES_PER_TICK {
             match self.candidate_receiver.try_recv() {
-                Ok(candidates) => {
-                    self.feed_candidates(candidates);
+                Ok(batch) => {
+                    candidates.extend(batch);
                     batches += 1;
                 }
-                Err(TryRecvError::Empty) => return batches,
-                Err(TryRecvError::Disconnected) => return batches,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
             }
         }
+
+        if !candidates.is_empty() {
+            self.feed_candidates(candidates);
+        }
+
+        batches
     }
 
     pub fn receive_pending_preview(&mut self) -> bool {
@@ -411,6 +419,30 @@ mod tests {
         }
     }
 
+    struct BatchSource {
+        batches: Vec<Vec<Candidate>>,
+    }
+
+    impl BatchSource {
+        fn new(batches: impl IntoIterator<Item = Vec<Candidate>>) -> Self {
+            Self {
+                batches: batches.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AsyncSource for BatchSource {
+        fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                for batch in self.batches {
+                    if sender.send(batch).await.is_err() {
+                        break;
+                    }
+                }
+            })
+        }
+    }
+
     impl AsyncSource for StaticSource {
         fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
             tokio::spawn(async move {
@@ -458,6 +490,32 @@ mod tests {
 
     async fn receive_all_candidates(app: &mut App) {
         while app.receive_candidates().await {}
+    }
+
+    #[tokio::test]
+    async fn app_limits_pending_candidate_batches_per_tick() {
+        let batches = (0..MAX_CANDIDATE_BATCHES_PER_TICK + 2).map(|index| {
+            vec![Candidate::new(
+                Value::raw(format!("command-{index}")),
+                'c',
+                None,
+            )]
+        });
+        let mut app =
+            App::with_sources([Box::new(BatchSource::new(batches)) as Box<dyn AsyncSource>]);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            app.receive_pending_candidates(),
+            MAX_CANDIDATE_BATCHES_PER_TICK
+        );
+        assert_eq!(app.state().results().len(), MAX_CANDIDATE_BATCHES_PER_TICK);
+
+        assert_eq!(app.receive_pending_candidates(), 2);
+        assert_eq!(
+            app.state().results().len(),
+            MAX_CANDIDATE_BATCHES_PER_TICK + 2
+        );
     }
 
     #[tokio::test]
