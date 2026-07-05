@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 
 use crate::history::edited_history_candidate;
 use crate::model::{Candidate, Queue, Value};
+use crate::shell;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -43,6 +44,12 @@ struct RankedCandidate {
     index: usize,
     score: u64,
     row: ResultRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchInput {
+    needle: String,
+    append: Vec<String>,
 }
 
 impl Default for LauncherState {
@@ -120,13 +127,13 @@ impl LauncherState {
     }
 
     fn search_pattern(&self) -> Option<Pattern> {
-        let input = search_needle(self.value.editable_text());
-        if input.is_empty() {
+        let input = SearchInput::parse(self.value.editable_text());
+        if input.needle.is_empty() {
             return None;
         }
 
         Some(Pattern::parse(
-            &input,
+            &input.needle,
             CaseMatching::Ignore,
             Normalization::Smart,
         ))
@@ -222,17 +229,9 @@ impl LauncherState {
             return self.value.clone();
         }
 
+        let input = SearchInput::parse(self.value.editable_text());
         match self.selected_value() {
-            Some(selected)
-                if selected.editable_text().len() < self.value.editable_text().len()
-                    && self
-                        .value
-                        .editable_text()
-                        .starts_with(selected.editable_text()) =>
-            {
-                self.value.clone()
-            }
-            Some(selected) => selected,
+            Some(selected) => append_search_terms(selected, &input.append),
             None => self.value.clone(),
         }
     }
@@ -310,8 +309,40 @@ fn preference_score_adjustment(entry: &CandidateEntry) -> u64 {
     entry.candidate.preference_score_millis() as u64
 }
 
-fn search_needle(input: &str) -> String {
-    input.replace("{}", "")
+impl SearchInput {
+    fn parse(input: &str) -> Self {
+        let mut needle = Vec::new();
+        let mut append = Vec::new();
+
+        for term in input.split_whitespace() {
+            if is_append_term(term) {
+                append.push(term.to_string());
+            } else {
+                needle.push(term);
+            }
+        }
+
+        Self {
+            needle: needle.join(" "),
+            append,
+        }
+    }
+}
+
+fn is_append_term(term: &str) -> bool {
+    term == "{}" || term == "'{}'" || term.starts_with('-')
+}
+
+fn append_search_terms(value: Value, append: &[String]) -> Value {
+    if append.is_empty() {
+        return value;
+    }
+
+    Value::raw(format!(
+        "{} {}",
+        shell::render_value(&value),
+        append.join(" ")
+    ))
 }
 
 fn rank_candidate(
@@ -426,6 +457,20 @@ mod tests {
     }
 
     #[test]
+    fn tilde_with_append_terms_seeds_edit_mode_from_selected_match_plus_append_terms() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("gnome-terminal"), 'c', None)]);
+        state.update_input(Value::raw("gterm -c {}"));
+
+        state.press_tilde();
+
+        assert_eq!(state.mode(), InputMode::Edit);
+        assert_eq!(state.value(), Value::raw("gnome-terminal -c {}"));
+        assert_eq!(selected_value(&state), None);
+    }
+
+    #[test]
     fn search_input_without_prefix_resolves_to_selected_match() {
         let mut state = LauncherState::default();
 
@@ -436,13 +481,23 @@ mod tests {
     }
 
     #[test]
-    fn search_input_extending_selected_match_resolves_to_raw_input() {
+    fn search_input_with_append_term_resolves_to_selected_match_plus_append_term() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("firefox --private-window"));
 
         assert_eq!(state.current(), Value::raw("firefox --private-window"));
+    }
+
+    #[test]
+    fn search_input_with_arbitrary_extra_text_resolves_to_raw_input() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
+        state.update_input(Value::raw("firefox private-window"));
+
+        assert_eq!(state.current(), Value::raw("firefox private-window"));
     }
 
     #[test]
@@ -1174,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_queues_typed_raw_command_extending_selected_prefix() {
+    fn tab_queues_selected_match_with_dash_append_term() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
@@ -1189,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_text_in_search_mode_can_be_queued() {
+    fn tab_queues_selected_match_with_slot_append_term() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
@@ -1204,17 +1259,57 @@ mod tests {
     }
 
     #[test]
-    fn slots_are_not_part_of_the_search_needle() {
+    fn tab_queues_selected_match_with_quoted_slot_append_term() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("printf"), 'c', None)]);
+        state.update_input(Value::raw("printf '{}'"));
+
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), Some("printf '{}'".into()));
+    }
+
+    #[test]
+    fn append_terms_are_not_part_of_the_search_needle() {
         let mut state = LauncherState::default();
 
         state.feed([
             Candidate::new(Value::escaped("/home/me/mv {} notes.txt"), 'f', None),
             Candidate::new(Value::raw("mv"), 'c', None),
         ]);
-        state.update_input(Value::raw("mv {}"));
+        state.update_input(Value::raw("mv -i {}"));
 
         assert_eq!(selected_value(&state), Some(Value::raw("mv")));
-        assert_eq!(state.value(), Value::raw("mv {}"));
+        assert_eq!(state.value(), Value::raw("mv -i {}"));
+    }
+
+    #[test]
+    fn append_terms_are_appended_to_fuzzy_selected_match() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(Value::raw("gnome-terminal"), 'c', None)]);
+        state.update_input(Value::raw("gterm -c {}"));
+
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), Some("gnome-terminal -c {}".into()));
+    }
+
+    #[test]
+    fn append_terms_are_appended_to_escaped_selected_match() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            None,
+        )]);
+        state.update_input(Value::raw("paper -v"));
+
+        state.press_tab();
+
+        assert_eq!(state.queue_status(), Some("'/home/me/paper.pdf' -v".into()));
     }
 
     #[test]
