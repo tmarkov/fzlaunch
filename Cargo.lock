@@ -216,6 +216,7 @@ name = "fzlaunch"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "nucleo-matcher",
  "ratatui",
  "serde",

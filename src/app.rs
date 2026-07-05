@@ -1,6 +1,8 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::config::{Config, FilesystemSourceConfig};
 use crate::history::History;
@@ -49,8 +51,47 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     })? {
         println!("{}", shell::render_value(command.command()));
         println!("plan: {}", render_execution_plan(&command));
+        std::io::stdout().flush()?;
+        execute_plan(&command)?;
     }
 
+    Ok(())
+}
+
+fn execute_plan(plan: &ExecutionPlan) -> std::io::Result<()> {
+    let command = shell::render_value(plan.command());
+
+    match plan.execution_mode() {
+        ExecutionMode::Foreground => exec_foreground(command),
+        ExecutionMode::Detached => spawn_detached(command),
+    }
+}
+
+fn exec_foreground(command: String) -> std::io::Result<()> {
+    Err(Command::new("sh").arg("-c").arg(command).exec())
+}
+
+fn spawn_detached(command: String) -> std::io::Result<()> {
+    let mut child = Command::new("sh");
+    child
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Only async-signal-safe work is allowed after fork and before exec.
+    unsafe {
+        child.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+
+    child.spawn()?;
     Ok(())
 }
 
