@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Config, FilesystemSourceConfig};
 use crate::history::History;
-use crate::model::{Candidate, CandidateSource, Queue, Value};
+use crate::model::{Candidate, CandidateSource, ExecutionMode, ExecutionPlan, Queue, Value};
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
-use crate::sources::{AsyncSource, CandidateReceiver, FilesystemRoot, PathExecutables};
+use crate::sources::{AsyncSource, CandidateReceiver, Executables, FilesystemRoot};
 use crate::state::LauncherState;
 use crate::ui::tui;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -36,6 +36,7 @@ pub fn run() {
 fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let path = std::env::var("PATH").unwrap_or_default();
+    let data_dirs = executable_data_dirs();
     let config = Config::load()?;
     let history = History::load()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -43,13 +44,56 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     if let Some(command) = runtime.block_on(async {
-        let mut app = App::start_with_config_and_history(cwd, &path, config, history);
+        let mut app = App::start_with_config_and_history(cwd, &path, &data_dirs, config, history);
         tui::run(&mut app).await
     })? {
-        println!("{}", shell::render_value(&command));
+        println!("{}", shell::render_value(command.command()));
+        println!("plan: {}", render_execution_plan(&command));
     }
 
     Ok(())
+}
+
+fn render_execution_plan(plan: &ExecutionPlan) -> String {
+    format!(
+        "execution_mode={} command={}",
+        execution_mode_name(plan.execution_mode()),
+        shell::render_value(plan.command())
+    )
+}
+
+fn execution_mode_name(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::Foreground => "foreground",
+        ExecutionMode::Detached => "detached",
+    }
+}
+
+fn executable_data_dirs() -> String {
+    let mut dirs = Vec::new();
+
+    if let Some(home) = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        dirs.push(home);
+    } else if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        dirs.push(PathBuf::from(home).join(".local/share"));
+    }
+
+    if let Some(data_dirs) = std::env::var_os("XDG_DATA_DIRS").filter(|value| !value.is_empty()) {
+        dirs.extend(std::env::split_paths(&data_dirs));
+    } else {
+        dirs.extend([
+            PathBuf::from("/usr/local/share"),
+            PathBuf::from("/usr/share"),
+        ]);
+    }
+
+    std::env::join_paths(dirs)
+        .expect("data dirs should be joinable")
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl App {
@@ -60,12 +104,13 @@ impl App {
 
     #[cfg(test)]
     pub fn start_with_config(cwd: PathBuf, path: &str, config: Config) -> Self {
-        Self::start_with_config_and_history(cwd, path, config, History::default())
+        Self::start_with_config_and_history(cwd, path, "", config, History::default())
     }
 
     fn start_with_config_and_history(
         cwd: PathBuf,
         path: &str,
+        data_dirs: &str,
         config: Config,
         history: History,
     ) -> Self {
@@ -79,8 +124,9 @@ impl App {
         }
 
         if config.sources.path.enabled {
-            sources.push(Box::new(PathExecutables::from_path_with_config(
+            sources.push(Box::new(Executables::from_path_and_data_dirs_with_config(
                 path,
+                data_dirs,
                 config.sources.path.clone(),
             )) as Box<dyn AsyncSource>);
         }
@@ -152,7 +198,7 @@ impl App {
         self.state.press_tab();
     }
 
-    pub fn press_enter(&mut self) -> Option<Value> {
+    pub fn press_enter(&mut self) -> Option<ExecutionPlan> {
         self.record_history_choice();
         self.state.press_enter()
     }
@@ -466,6 +512,19 @@ mod tests {
             .map(|candidate| candidate.value().clone())
     }
 
+    #[test]
+    fn execution_plan_rendering_includes_command_and_execution_mode() {
+        let plan = ExecutionPlan::new(
+            Value::raw("less '/home/me/paper.pdf'"),
+            ExecutionMode::Foreground,
+        );
+
+        assert_eq!(
+            render_execution_plan(&plan),
+            "execution_mode=foreground command=less '/home/me/paper.pdf'"
+        );
+    }
+
     fn preview_for_path(path: &std::path::Path, config: &Config) -> Option<String> {
         selected_preview_command(
             Some(
@@ -664,7 +723,7 @@ mod tests {
         app.update_input(Value::raw("nvim {}"));
         assert_eq!(
             app.press_enter(),
-            Some(Value::raw("nvim '/home/me/paper.pdf'"))
+            Some(Value::raw("nvim '/home/me/paper.pdf'").into())
         );
     }
 

@@ -5,16 +5,18 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::model::Value;
+use crate::model::{Action, ExecutionMode, Value};
 
 const DEFAULT_CONFIG_TEXT: &str = r#"[sources.path]
 enabled = true
 direct_action = "{}"
+direct_action_execution = "foreground"
 preview_command = "man {}"
 
 [sources.filesystem]
 enabled = true
 direct_action = "xdg-open {}"
+direct_action_execution = "detached"
 directory_preview_command = "ls {}"
 text_file_preview_command = "cat {}"
 document_preview_command = "file {}"
@@ -38,14 +40,14 @@ pub struct SourceConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathSourceConfig {
     pub enabled: bool,
-    pub direct_action: Value,
+    pub direct_action: Action,
     pub preview_command: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemSourceConfig {
     pub enabled: bool,
-    pub direct_action: Value,
+    pub direct_action: Action,
     pub directory_preview_command: Option<Value>,
     pub text_file_preview_command: Option<Value>,
     pub document_preview_command: Option<Value>,
@@ -125,7 +127,7 @@ impl Default for PathSourceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            direct_action: Value::raw("{}"),
+            direct_action: Action::foreground(Value::raw("{}")),
             preview_command: Value::raw("man {}"),
         }
     }
@@ -135,7 +137,7 @@ impl Default for FilesystemSourceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            direct_action: Value::raw("xdg-open {}"),
+            direct_action: Action::detached(Value::raw("xdg-open {}")),
             directory_preview_command: Some(Value::raw("ls {}")),
             text_file_preview_command: Some(Value::raw("cat {}")),
             document_preview_command: Some(Value::raw("file {}")),
@@ -177,7 +179,15 @@ impl From<PathSourceConfigFile> for PathSourceConfig {
             enabled: file.enabled.unwrap_or(defaults.enabled),
             direct_action: file
                 .direct_action
-                .map(Value::raw)
+                .map(|value| {
+                    Action::new(
+                        Value::raw(value),
+                        file.direct_action_execution
+                            .as_deref()
+                            .and_then(parse_execution_mode)
+                            .unwrap_or(defaults.direct_action.execution_mode()),
+                    )
+                })
                 .unwrap_or(defaults.direct_action),
             preview_command: file
                 .preview_command
@@ -195,7 +205,15 @@ impl From<FilesystemSourceConfigFile> for FilesystemSourceConfig {
             enabled: file.enabled.unwrap_or(defaults.enabled),
             direct_action: file
                 .direct_action
-                .map(Value::raw)
+                .map(|value| {
+                    Action::new(
+                        Value::raw(value),
+                        file.direct_action_execution
+                            .as_deref()
+                            .and_then(parse_execution_mode)
+                            .unwrap_or(defaults.direct_action.execution_mode()),
+                    )
+                })
                 .unwrap_or(defaults.direct_action),
             directory_preview_command: preview_command(
                 file.directory_preview_command,
@@ -286,6 +304,7 @@ struct SourceConfigFile {
 struct PathSourceConfigFile {
     enabled: Option<bool>,
     direct_action: Option<String>,
+    direct_action_execution: Option<String>,
     preview_command: Option<String>,
 }
 
@@ -293,6 +312,7 @@ struct PathSourceConfigFile {
 struct FilesystemSourceConfigFile {
     enabled: Option<bool>,
     direct_action: Option<String>,
+    direct_action_execution: Option<String>,
     directory_preview_command: Option<String>,
     text_file_preview_command: Option<String>,
     document_preview_command: Option<String>,
@@ -300,6 +320,14 @@ struct FilesystemSourceConfigFile {
     archive_preview_command: Option<String>,
     media_preview_command: Option<String>,
     binary_preview_command: Option<String>,
+}
+
+fn parse_execution_mode(mode: &str) -> Option<ExecutionMode> {
+    match mode {
+        "foreground" => Some(ExecutionMode::Foreground),
+        "detached" => Some(ExecutionMode::Detached),
+        _ => None,
+    }
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -333,12 +361,12 @@ mod tests {
                 sources: SourceConfig {
                     path: PathSourceConfig {
                         enabled: true,
-                        direct_action: Value::raw("{}"),
+                        direct_action: Action::foreground(Value::raw("{}")),
                         preview_command: Value::raw("man {}"),
                     },
                     filesystem: FilesystemSourceConfig {
                         enabled: true,
-                        direct_action: Value::raw("xdg-open {}"),
+                        direct_action: Action::detached(Value::raw("xdg-open {}")),
                         directory_preview_command: Some(Value::raw("ls {}")),
                         text_file_preview_command: Some(Value::raw("cat {}")),
                         document_preview_command: Some(Value::raw("file {}")),
@@ -411,12 +439,12 @@ binary_preview_command = "show-binary {}"
                 sources: SourceConfig {
                     path: PathSourceConfig {
                         enabled: false,
-                        direct_action: Value::raw("run-command {}"),
+                        direct_action: Action::foreground(Value::raw("run-command {}")),
                         preview_command: Value::raw("help-command {}"),
                     },
                     filesystem: FilesystemSourceConfig {
                         enabled: false,
-                        direct_action: Value::raw("open-path {}"),
+                        direct_action: Action::detached(Value::raw("open-path {}")),
                         directory_preview_command: Some(Value::raw("list-path {}")),
                         text_file_preview_command: Some(Value::raw("show-text {}")),
                         document_preview_command: Some(Value::raw("show-document {}")),

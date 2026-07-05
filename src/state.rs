@@ -1,7 +1,9 @@
 use std::cmp::Reverse;
 
 use crate::history::edited_history_candidate;
-use crate::model::{Candidate, Queue, Value};
+use crate::model::{
+    Action, Candidate, CandidateSource, ExecutionMode, ExecutionPlan, Queue, Value,
+};
 use crate::shell;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -179,16 +181,16 @@ impl LauncherState {
     }
 
     pub fn press_tab(&mut self) {
-        let current = self.current();
-        if !current.editable_text().is_empty() {
+        let current = self.current_action();
+        if !current.value().editable_text().is_empty() {
             self.queue.compose(current);
         }
         self.reset_input();
     }
 
-    pub fn press_enter(&mut self) -> Option<Value> {
-        let current = self.current();
-        if current.editable_text().is_empty() {
+    pub fn press_enter(&mut self) -> Option<ExecutionPlan> {
+        let current = self.current_action();
+        if current.value().editable_text().is_empty() {
             self.reset_input();
             return None;
         }
@@ -225,14 +227,21 @@ impl LauncherState {
     }
 
     pub fn current(&self) -> Value {
+        self.current_action().value().clone()
+    }
+
+    fn current_action(&self) -> Action {
         if self.mode == InputMode::Edit {
-            return self.value.clone();
+            return Action::foreground(self.value.clone());
         }
 
         let input = SearchInput::parse(self.value.editable_text());
-        match self.selected_value() {
-            Some(selected) => append_search_terms(selected, &input.append),
-            None => self.value.clone(),
+        match self.selected_entry() {
+            Some(entry) => Action::new(
+                append_search_terms(entry.candidate.value().clone(), &input.append),
+                selected_value_execution_mode(&entry.candidate),
+            ),
+            None => Action::foreground(self.value.clone()),
         }
     }
 
@@ -282,11 +291,6 @@ impl LauncherState {
         self.selected_index
             .and_then(|index| self.results.get(index))
             .and_then(|result| self.candidates.get(result.index))
-    }
-
-    fn selected_value(&self) -> Option<Value> {
-        self.selected_entry()
-            .map(|entry| entry.candidate.value().clone())
     }
 }
 
@@ -343,6 +347,17 @@ fn append_search_terms(value: Value, append: &[String]) -> Value {
         shell::render_value(&value),
         append.join(" ")
     ))
+}
+
+fn selected_value_execution_mode(candidate: &Candidate) -> ExecutionMode {
+    if candidate.source() == CandidateSource::FilesystemPath {
+        return ExecutionMode::Foreground;
+    }
+
+    candidate
+        .direct_action()
+        .map(Action::execution_mode)
+        .unwrap_or(ExecutionMode::Foreground)
 }
 
 fn rank_candidate(
@@ -424,6 +439,7 @@ fn merge_ranked_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Action, ExecutionMode};
 
     fn selected_value(state: &LauncherState) -> Option<Value> {
         state.selected().map(|candidate| candidate.value().clone())
@@ -1077,7 +1093,7 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw("evince '/home/me/paper.pdf'"))
+            Some(Value::raw("evince '/home/me/paper.pdf'").into())
         );
     }
 
@@ -1095,7 +1111,7 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw("evince '/home/me/paper.pdf'"))
+            Some(Value::raw("evince '/home/me/paper.pdf'").into())
         );
 
         assert_eq!(state.mode(), InputMode::Search);
@@ -1116,7 +1132,7 @@ mod tests {
             Candidate::new(Value::raw("evince"), 'c', None),
         ]);
         state.update_input(Value::raw("evince"));
-        assert_eq!(state.press_enter(), Some(Value::raw("evince")));
+        assert_eq!(state.press_enter(), Some(Value::raw("evince").into()));
 
         state.update_input(Value::raw("fire"));
 
@@ -1194,7 +1210,7 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw("xdg-open '/home/me/paper.pdf'"))
+            Some(Value::raw("xdg-open '/home/me/paper.pdf'").into())
         );
     }
 
@@ -1211,7 +1227,49 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw("xdg-open '/home/me/paper.pdf'"))
+            Some(Value::raw("xdg-open '/home/me/paper.pdf'").into())
+        );
+    }
+
+    #[test]
+    fn enter_uses_selected_direct_action_execution_mode() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new_with_action(
+            Value::escaped("/home/me/paper.pdf"),
+            'f',
+            Some(Action::detached(Value::raw("xdg-open {}"))),
+        )]);
+        state.update_input(Value::raw(";f"));
+
+        assert_eq!(
+            state
+                .press_enter()
+                .expect("command should compile")
+                .execution_mode(),
+            ExecutionMode::Detached
+        );
+    }
+
+    #[test]
+    fn composed_command_inherits_execution_mode_from_slot_template() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new_with_action(
+            Value::raw("xdg-open {}"),
+            'c',
+            Some(Action::detached(Value::raw("{}"))),
+        )]);
+        state.update_input(Value::raw(";cxdg"));
+        state.press_tab();
+        state.update_input(Value::raw("/home/me/paper.pdf"));
+
+        assert_eq!(
+            state
+                .press_enter()
+                .expect("command should compile")
+                .execution_mode(),
+            ExecutionMode::Detached
         );
     }
 
@@ -1224,7 +1282,7 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw("ps aux | grep firefox"))
+            Some(Value::raw("ps aux | grep firefox").into())
         );
     }
 
@@ -1321,7 +1379,7 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw("ps aux | grep firefox"))
+            Some(Value::raw("ps aux | grep firefox").into())
         );
     }
 }

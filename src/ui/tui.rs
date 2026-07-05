@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::{Frame, Terminal};
 
 use crate::app::App;
-use crate::model::Value;
+use crate::model::ExecutionPlan;
 use crate::preview::Preview;
 use crate::state::{InputMode, ResultRow};
 use tokio::sync::mpsc;
@@ -25,7 +25,7 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const BLOCKING_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RESULT_HIGHLIGHT_SYMBOL: &str = "> ";
 
-pub async fn run(app: &mut App) -> io::Result<Option<Value>> {
+pub async fn run(app: &mut App) -> io::Result<Option<ExecutionPlan>> {
     let mut terminal = TerminalSession::enter()?;
     let mut events = TerminalEvents::start();
     app.refresh_preview();
@@ -111,7 +111,7 @@ impl Drop for TerminalEvents {
 #[derive(Debug, PartialEq, Eq)]
 enum KeyAction {
     Continue,
-    Quit(Option<Value>),
+    Quit(Option<ExecutionPlan>),
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
@@ -486,6 +486,7 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Value;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -572,7 +573,7 @@ mod tests {
 
         assert_eq!(
             handle_key(&mut app, key(KeyCode::Enter)),
-            KeyAction::Quit(Some(Value::raw("nvim")))
+            KeyAction::Quit(Some(Value::raw("nvim").into()))
         );
     }
 }

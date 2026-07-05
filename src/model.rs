@@ -12,11 +12,29 @@ pub struct Value {
     insertion_policy: InsertionPolicy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExecutionMode {
+    Foreground,
+    Detached,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    value: Value,
+    execution_mode: ExecutionMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionPlan {
+    command: Value,
+    execution_mode: ExecutionMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     value: Value,
     selector: char,
-    direct_action: Option<Value>,
+    direct_action: Option<Action>,
     source: CandidateSource,
     preference_score_millis: u32,
 }
@@ -31,7 +49,7 @@ pub enum CandidateSource {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Queue {
-    values: VecDeque<Value>,
+    values: VecDeque<Action>,
 }
 
 impl Queue {
@@ -41,7 +59,7 @@ impl Queue {
 
     pub fn from_values(values: impl IntoIterator<Item = Value>) -> Self {
         Self {
-            values: values.into_iter().collect(),
+            values: values.into_iter().map(Action::foreground).collect(),
         }
     }
 
@@ -49,8 +67,8 @@ impl Queue {
         self.values.is_empty()
     }
 
-    pub fn compose(&mut self, current: Value) {
-        let current = self.compose_current(current);
+    pub fn compose(&mut self, current: impl Into<Action>) {
+        let current = self.compose_current(current.into());
         self.values.push_back(current);
     }
 
@@ -62,25 +80,27 @@ impl Queue {
         Some(render_command_order(&self.values))
     }
 
-    pub fn compile(&self) -> Option<Value> {
-        if self.values.is_empty() || self.values.iter().any(Value::has_slots) {
+    pub fn compile(&self) -> Option<ExecutionPlan> {
+        let current = self.values.back()?;
+        if self.values.iter().any(|action| action.value().has_slots()) {
             return None;
         }
 
-        Some(Value::raw(render_command_order(&self.values)))
+        Some(ExecutionPlan {
+            command: Value::raw(render_command_order(&self.values)),
+            execution_mode: current.execution_mode(),
+        })
     }
 
-    fn compose_current(&mut self, current: Value) -> Value {
-        if current.has_slots() {
+    fn compose_current(&mut self, current: Action) -> Action {
+        if current.value().has_slots() {
             return current.fill_slots_from_queue(&mut self.values);
         }
 
-        if self.values.front().is_some_and(Value::has_slots) {
-            let queued = self
-                .values
-                .pop_front()
-                .expect("front checked before pop_front");
-
+        if let Some(queued) = self
+            .values
+            .pop_front_if(|action| action.value().has_slots())
+        {
             let mut values = VecDeque::from([current]);
             return queued.fill_slots_from_queue(&mut values);
         }
@@ -89,21 +109,100 @@ impl Queue {
     }
 }
 
-fn render_command_order(values: &VecDeque<Value>) -> String {
+fn render_command_order(values: &VecDeque<Action>) -> String {
     let Some(current) = values.back() else {
         return String::new();
     };
 
     let mut parts = Vec::with_capacity(values.len());
-    parts.push(crate::shell::render_value(current));
+    parts.push(crate::shell::render_value(current.value()));
     parts.extend(
         values
             .iter()
             .take(values.len() - 1)
-            .map(crate::shell::render_value),
+            .map(|action| crate::shell::render_value(action.value())),
     );
 
     parts.join(" ")
+}
+
+impl Action {
+    pub fn foreground(value: Value) -> Self {
+        Self {
+            value,
+            execution_mode: ExecutionMode::Foreground,
+        }
+    }
+
+    pub fn detached(value: Value) -> Self {
+        Self {
+            value,
+            execution_mode: ExecutionMode::Detached,
+        }
+    }
+
+    pub fn new(value: Value, execution_mode: ExecutionMode) -> Self {
+        Self {
+            value,
+            execution_mode,
+        }
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+
+    fn fill_slots_from_queue(self, values: &mut VecDeque<Action>) -> Self {
+        Self {
+            value: self.value.fill_slots_from_queue(values),
+            execution_mode: self.execution_mode,
+        }
+    }
+}
+
+impl From<Value> for Action {
+    fn from(value: Value) -> Self {
+        Self::foreground(value)
+    }
+}
+
+impl ExecutionPlan {
+    pub fn new(command: Value, execution_mode: ExecutionMode) -> Self {
+        Self {
+            command,
+            execution_mode,
+        }
+    }
+
+    pub fn command(&self) -> &Value {
+        &self.command
+    }
+
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+}
+
+impl PartialEq<Value> for ExecutionPlan {
+    fn eq(&self, other: &Value) -> bool {
+        &self.command == other
+    }
+}
+
+impl PartialEq<ExecutionPlan> for Value {
+    fn eq(&self, other: &ExecutionPlan) -> bool {
+        self == &other.command
+    }
+}
+
+impl From<Value> for ExecutionPlan {
+    fn from(command: Value) -> Self {
+        Self::new(command, ExecutionMode::Foreground)
+    }
 }
 
 impl Value {
@@ -137,7 +236,7 @@ impl Value {
         update(&mut self.editable_text);
     }
 
-    fn fill_slots_from_queue(self, values: &mut VecDeque<Value>) -> Self {
+    fn fill_slots_from_queue(self, values: &mut VecDeque<Action>) -> Self {
         let mut text = self.editable_text;
 
         while let Some(value) = values.pop_front() {
@@ -146,7 +245,7 @@ impl Value {
                 break;
             };
 
-            let inserted = crate::shell::render_value(&value);
+            let inserted = crate::shell::render_value(value.value());
             text.replace_range(slot_index..slot_index + 2, &inserted);
         }
 
@@ -158,7 +257,12 @@ impl Value {
 }
 
 impl Candidate {
+    #[cfg(test)]
     pub fn new(value: Value, selector: char, direct_action: Option<Value>) -> Self {
+        Self::new_with_action(value, selector, direct_action.map(Action::foreground))
+    }
+
+    pub fn new_with_action(value: Value, selector: char, direct_action: Option<Action>) -> Self {
         Self {
             value,
             selector,
@@ -188,7 +292,7 @@ impl Candidate {
         &self.value
     }
 
-    pub(crate) fn direct_action(&self) -> Option<&Value> {
+    pub(crate) fn direct_action(&self) -> Option<&Action> {
         self.direct_action.as_ref()
     }
 
@@ -211,7 +315,7 @@ mod tests {
     use crate::shell::render_value;
 
     fn compile_text(queue: &Queue) -> String {
-        render_value(&queue.compile().expect("queue should compile"))
+        render_value(queue.compile().expect("queue should compile").command())
     }
 
     #[test]
@@ -235,7 +339,22 @@ mod tests {
         queue.compose(Value::raw("cmd {}"));
         let command = queue.compile().expect("queue should compile");
 
-        assert_eq!(render_value(&command), "cmd a b");
+        assert_eq!(render_value(command.command()), "cmd a b");
+    }
+
+    #[test]
+    fn composed_command_inherits_execution_mode_from_slot_template() {
+        let mut queue = Queue::from_values([Value::escaped("/home/me/paper.pdf")]);
+
+        queue.compose(Action::detached(Value::raw("xdg-open {}")));
+
+        assert_eq!(
+            queue
+                .compile()
+                .expect("queue should compile")
+                .execution_mode(),
+            ExecutionMode::Detached
+        );
     }
 
     #[test]

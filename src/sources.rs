@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{FilesystemSourceConfig, PathSourceConfig};
-use crate::model::{Candidate, CandidateSource, Value};
+use crate::model::{Action, Candidate, CandidateSource, ExecutionMode, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -15,36 +15,65 @@ pub trait AsyncSource: Send + 'static {
     fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()>;
 }
 
-pub struct PathExecutables {
-    pub dirs: Vec<PathBuf>,
+pub struct Executables {
+    pub path_dirs: Vec<PathBuf>,
+    pub desktop_dirs: Vec<PathBuf>,
     config: PathSourceConfig,
 }
+
+#[cfg(test)]
+pub type PathExecutables = Executables;
 
 pub struct FilesystemRoot {
     pub root: PathBuf,
     config: FilesystemSourceConfig,
 }
 
-impl PathExecutables {
+impl Executables {
     #[cfg(test)]
     pub fn from_path(path: &str) -> Self {
         Self::from_path_with_config(path, PathSourceConfig::default())
     }
 
+    #[cfg(test)]
     pub fn from_path_with_config(path: &str, config: PathSourceConfig) -> Self {
-        let dirs = if path.is_empty() {
-            Vec::new()
-        } else {
-            std::env::split_paths(path).collect()
-        };
+        Self::from_path_and_data_dirs_with_config(path, "", config)
+    }
 
-        Self { dirs, config }
+    pub fn from_path_and_data_dirs_with_config(
+        path: &str,
+        data_dirs: &str,
+        config: PathSourceConfig,
+    ) -> Self {
+        let path_dirs = split_env_paths(path);
+        let desktop_dirs = split_env_paths(data_dirs)
+            .into_iter()
+            .map(|dir| dir.join("applications"))
+            .collect();
+
+        Self {
+            path_dirs,
+            desktop_dirs,
+            config,
+        }
     }
 
     fn stream_candidate_batches(&self, sender: CandidateSender) {
         let mut seen = BTreeSet::new();
 
-        for dir in &self.dirs {
+        for dir in &self.desktop_dirs {
+            let candidates = desktop_executables_in_dir(dir)
+                .into_iter()
+                .filter(|executable| seen.insert(executable.command.clone()))
+                .map(|executable| desktop_executable_candidate(executable, &self.config))
+                .collect::<Vec<_>>();
+
+            if !candidates.is_empty() && sender.blocking_send(candidates).is_err() {
+                break;
+            }
+        }
+
+        for dir in &self.path_dirs {
             let candidates = executable_commands_in_dir(dir)
                 .into_iter()
                 .filter(|command| seen.insert(command.clone()))
@@ -58,7 +87,7 @@ impl PathExecutables {
     }
 }
 
-impl AsyncSource for PathExecutables {
+impl AsyncSource for Executables {
     fn stream_candidates(self: Box<Self>, sender: CandidateSender) -> JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
             self.stream_candidate_batches(sender);
@@ -105,6 +134,20 @@ impl AsyncSource for FilesystemRoot {
 enum FilesystemEntryKind {
     Directory,
     File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DesktopExecutable {
+    command: String,
+    execution_mode: ExecutionMode,
+}
+
+fn split_env_paths(paths: &str) -> Vec<PathBuf> {
+    if paths.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(paths).collect()
+    }
 }
 
 fn filesystem_paths_in_dir(dir: PathBuf) -> BTreeSet<(String, FilesystemEntryKind)> {
@@ -163,6 +206,88 @@ fn executable_commands_in_dir(dir: &Path) -> BTreeSet<String> {
     commands
 }
 
+fn desktop_executables_in_dir(dir: &Path) -> Vec<DesktopExecutable> {
+    let mut executables = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return executables;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("desktop") {
+            continue;
+        }
+
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(executable) = parse_desktop_executable(&text) {
+            executables.push(executable);
+        }
+    }
+
+    executables.sort();
+    executables
+}
+
+fn parse_desktop_executable(text: &str) -> Option<DesktopExecutable> {
+    let mut in_desktop_entry = false;
+    let mut exec = None;
+    let mut terminal = false;
+    let mut hidden = false;
+
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+
+        if !in_desktop_entry {
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("Exec=") {
+            exec = desktop_exec_binary(value);
+        } else if let Some(value) = line.strip_prefix("Terminal=") {
+            terminal = value.eq_ignore_ascii_case("true");
+        } else if let Some(value) = line.strip_prefix("NoDisplay=") {
+            hidden |= value.eq_ignore_ascii_case("true");
+        } else if let Some(value) = line.strip_prefix("Hidden=") {
+            hidden |= value.eq_ignore_ascii_case("true");
+        }
+    }
+
+    if hidden {
+        return None;
+    }
+
+    Some(DesktopExecutable {
+        command: exec?,
+        execution_mode: if terminal {
+            ExecutionMode::Foreground
+        } else {
+            ExecutionMode::Detached
+        },
+    })
+}
+
+fn desktop_exec_binary(exec: &str) -> Option<String> {
+    exec.split_whitespace()
+        .find(|term| !term.starts_with('%'))
+        .map(|term| term.trim_matches('"').trim_matches('\'').to_string())
+        .filter(|term| !term.is_empty())
+        .and_then(|term| {
+            Path::new(&term)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+}
+
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -172,8 +297,23 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn executable_candidate(command: String, config: &PathSourceConfig) -> Candidate {
-    Candidate::new(Value::raw(command), 'c', Some(config.direct_action.clone()))
+    Candidate::new_with_action(Value::raw(command), 'c', Some(config.direct_action.clone()))
         .with_source(CandidateSource::PathExecutable)
+}
+
+fn desktop_executable_candidate(
+    executable: DesktopExecutable,
+    config: &PathSourceConfig,
+) -> Candidate {
+    Candidate::new_with_action(
+        Value::raw(executable.command),
+        'c',
+        Some(Action::new(
+            config.direct_action.value().clone(),
+            executable.execution_mode,
+        )),
+    )
+    .with_source(CandidateSource::PathExecutable)
 }
 
 fn filesystem_candidate(
@@ -185,7 +325,7 @@ fn filesystem_candidate(
         (path, FilesystemEntryKind::File) => (path, 'f'),
     };
 
-    Candidate::new(
+    Candidate::new_with_action(
         Value::escaped(path),
         match_char,
         Some(config.direct_action.clone()),
@@ -199,7 +339,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
 
-    use crate::model::{Candidate, CandidateSource, Value};
+    use crate::model::{Action, Candidate, CandidateSource, ExecutionMode, ExecutionPlan, Value};
     use crate::sources::{AsyncSource, CandidateSender};
     use crate::state::LauncherState;
     use crate::test_support::{path_string, TempDir};
@@ -214,6 +354,11 @@ mod tests {
         fs::write(&path, b"#!/bin/sh\n").expect("test executable should be written");
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))
             .expect("test executable permissions should be set");
+    }
+
+    fn write_desktop_file(dir: &Path, name: &str, text: &str) {
+        fs::create_dir_all(dir).expect("desktop directory should be created");
+        fs::write(dir.join(name), text).expect("desktop file should be written");
     }
 
     struct StaticSource {
@@ -256,29 +401,38 @@ mod tests {
             .with_source(CandidateSource::PathExecutable)
     }
 
+    fn expected_executable_with_mode(command: &str, mode: ExecutionMode) -> Candidate {
+        Candidate::new_with_action(
+            Value::raw(command),
+            'c',
+            Some(Action::new(Value::raw("{}"), mode)),
+        )
+        .with_source(CandidateSource::PathExecutable)
+    }
+
     fn expected_directory(path: &Path) -> Candidate {
-        Candidate::new(
+        Candidate::new_with_action(
             Value::escaped(path.to_str().expect("path should be utf-8")),
             'd',
-            Some(Value::raw("xdg-open {}")),
+            Some(Action::detached(Value::raw("xdg-open {}"))),
         )
         .with_source(CandidateSource::FilesystemPath)
     }
 
     fn expected_text_file(path: &Path) -> Candidate {
-        Candidate::new(
+        Candidate::new_with_action(
             Value::escaped(path.to_str().expect("path should be utf-8")),
             'f',
-            Some(Value::raw("xdg-open {}")),
+            Some(Action::detached(Value::raw("xdg-open {}"))),
         )
         .with_source(CandidateSource::FilesystemPath)
     }
 
     fn expected_binary_file(path: &Path) -> Candidate {
-        Candidate::new(
+        Candidate::new_with_action(
             Value::escaped(path.to_str().expect("path should be utf-8")),
             'f',
-            Some(Value::raw("xdg-open {}")),
+            Some(Action::detached(Value::raw("xdg-open {}"))),
         )
         .with_source(CandidateSource::FilesystemPath)
     }
@@ -372,7 +526,7 @@ mod tests {
         let candidates = collect_source(Box::new(super::PathExecutables::from_path_with_config(
             bin.to_str().expect("path should be utf-8"),
             PathSourceConfig {
-                direct_action: Value::raw("run-command {}"),
+                direct_action: Action::foreground(Value::raw("run-command {}")),
                 preview_command: Value::raw("help-command {}"),
                 ..PathSourceConfig::default()
             },
@@ -387,6 +541,149 @@ mod tests {
                 Some(Value::raw("run-command {}"))
             )
             .with_source(CandidateSource::PathExecutable)]
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_source_reads_detached_desktop_entries() {
+        let data = temp_source_dir("executable-source-desktop-detached");
+        let applications = data.join("applications");
+        write_desktop_file(
+            &applications,
+            "monitor.desktop",
+            "[Desktop Entry]\nExec=/usr/bin/gnome-system-monitor\nTerminal=false\n",
+        );
+
+        let candidates = collect_source(Box::new(
+            super::Executables::from_path_and_data_dirs_with_config(
+                "",
+                data.to_str().expect("path should be utf-8"),
+                PathSourceConfig::default(),
+            ),
+        ))
+        .await;
+
+        assert_eq!(
+            candidates,
+            vec![expected_executable_with_mode(
+                "gnome-system-monitor",
+                ExecutionMode::Detached
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_source_reads_foreground_desktop_entries() {
+        let data = temp_source_dir("executable-source-desktop-foreground");
+        let applications = data.join("applications");
+        write_desktop_file(
+            &applications,
+            "htop.desktop",
+            "[Desktop Entry]\nExec=htop\nTerminal=true\n",
+        );
+
+        let candidates = collect_source(Box::new(
+            super::Executables::from_path_and_data_dirs_with_config(
+                "",
+                data.to_str().expect("path should be utf-8"),
+                PathSourceConfig::default(),
+            ),
+        ))
+        .await;
+
+        assert_eq!(
+            candidates,
+            vec![expected_executable_with_mode(
+                "htop",
+                ExecutionMode::Foreground
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_source_ignores_hidden_desktop_entries() {
+        let data = temp_source_dir("executable-source-desktop-hidden");
+        let applications = data.join("applications");
+        write_desktop_file(
+            &applications,
+            "hidden.desktop",
+            "[Desktop Entry]\nExec=hidden-command\nNoDisplay=true\n",
+        );
+        write_desktop_file(
+            &applications,
+            "deleted.desktop",
+            "[Desktop Entry]\nExec=deleted-command\nHidden=true\n",
+        );
+
+        let candidates = collect_source(Box::new(
+            super::Executables::from_path_and_data_dirs_with_config(
+                "",
+                data.to_str().expect("path should be utf-8"),
+                PathSourceConfig::default(),
+            ),
+        ))
+        .await;
+
+        assert_eq!(candidates, Vec::<Candidate>::new());
+    }
+
+    #[tokio::test]
+    async fn executable_source_skips_path_executables_covered_by_desktop_entries() {
+        let data = temp_source_dir("executable-source-desktop-deduplicate");
+        let applications = data.join("applications");
+        write_desktop_file(
+            &applications,
+            "monitor.desktop",
+            "[Desktop Entry]\nExec=gnome-system-monitor\nTerminal=false\n",
+        );
+        let bin = temp_source_dir("executable-source-desktop-deduplicate-bin");
+        write_file(bin.join("gnome-system-monitor"), 0o755);
+
+        let candidates = collect_source(Box::new(
+            super::Executables::from_path_and_data_dirs_with_config(
+                bin.to_str().expect("path should be utf-8"),
+                data.to_str().expect("path should be utf-8"),
+                PathSourceConfig::default(),
+            ),
+        ))
+        .await;
+
+        assert_eq!(
+            candidates,
+            vec![expected_executable_with_mode(
+                "gnome-system-monitor",
+                ExecutionMode::Detached
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_desktop_entries_do_not_shadow_path_executables() {
+        let data = temp_source_dir("executable-source-hidden-desktop-path");
+        let applications = data.join("applications");
+        write_desktop_file(
+            &applications,
+            "userapp-nvim.desktop",
+            "[Desktop Entry]\nExec=nvim %f\nName=nvim\nNoDisplay=true\n",
+        );
+        let bin = temp_source_dir("executable-source-hidden-desktop-path-bin");
+        write_file(bin.join("nvim"), 0o755);
+
+        let candidates = collect_source(Box::new(
+            super::Executables::from_path_and_data_dirs_with_config(
+                bin.to_str().expect("path should be utf-8"),
+                data.to_str().expect("path should be utf-8"),
+                PathSourceConfig::default(),
+            ),
+        ))
+        .await;
+
+        assert_eq!(
+            candidates,
+            vec![expected_executable_with_mode(
+                "nvim",
+                ExecutionMode::Foreground
+            )]
         );
     }
 
@@ -484,7 +781,10 @@ mod tests {
         );
         state.update_input(Value::raw(";cfzrun"));
 
-        assert_eq!(state.press_enter(), Some(Value::raw("fzlaunch-run-me")));
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw("fzlaunch-run-me").into())
+        );
     }
 
     #[tokio::test]
@@ -522,10 +822,13 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw(format!(
-                "nvim $(readlink -f '{}')",
-                file.to_str().expect("path should be utf-8")
-            )))
+            Some(
+                Value::raw(format!(
+                    "nvim $(readlink -f '{}')",
+                    file.to_str().expect("path should be utf-8")
+                ))
+                .into()
+            )
         );
     }
 
@@ -674,10 +977,13 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw(format!(
-                "xdg-open '{}'",
-                file.to_str().expect("path should be utf-8")
-            )))
+            Some(ExecutionPlan::new(
+                Value::raw(format!(
+                    "xdg-open '{}'",
+                    file.to_str().expect("path should be utf-8")
+                )),
+                ExecutionMode::Detached,
+            ))
         );
     }
 
@@ -693,10 +999,13 @@ mod tests {
 
         assert_eq!(
             state.press_enter(),
-            Some(Value::raw(format!(
-                "xdg-open '{}'",
-                dir.to_str().expect("path should be utf-8")
-            )))
+            Some(ExecutionPlan::new(
+                Value::raw(format!(
+                    "xdg-open '{}'",
+                    dir.to_str().expect("path should be utf-8")
+                )),
+                ExecutionMode::Detached,
+            ))
         );
     }
 
@@ -755,7 +1064,7 @@ mod tests {
         let candidates = collect_source(Box::new(super::FilesystemRoot::new_with_config(
             root.path().to_path_buf(),
             FilesystemSourceConfig {
-                direct_action: Value::raw("open-path {}"),
+                direct_action: Action::foreground(Value::raw("open-path {}")),
                 ..FilesystemSourceConfig::default()
             },
         )))

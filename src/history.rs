@@ -4,11 +4,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::model::{Candidate, CandidateSource, InsertionPolicy, Value};
+use crate::model::{Action, Candidate, CandidateSource, ExecutionMode, InsertionPolicy, Value};
 
 const SCORE_UNIT: u64 = 1_000;
 const HALF_LIFE_SECS: u64 = 30 * 24 * 60 * 60;
-const FIELD_COUNT: usize = 9;
+const FIELD_COUNT: usize = 10;
+const LEGACY_FIELD_COUNT: usize = 9;
 
 #[derive(Debug, Clone, Default)]
 pub struct History {
@@ -152,7 +153,7 @@ impl History {
 }
 
 pub(crate) fn edited_history_candidate(value: Value, origin: &Candidate) -> Candidate {
-    Candidate::new(value, origin.selector(), origin.direct_action().cloned())
+    Candidate::new_with_action(value, origin.selector(), origin.direct_action().cloned())
         .with_source(CandidateSource::History)
 }
 
@@ -218,10 +219,13 @@ fn format_record(record: &HistoryRecord) -> String {
         policy_name(record.candidate.value().insertion_policy()),
         record.candidate.value().editable_text(),
         direct_action
-            .map(|value| policy_name(value.insertion_policy()))
+            .map(|action| policy_name(action.value().insertion_policy()))
             .unwrap_or(""),
         direct_action
-            .map(|value| value.editable_text())
+            .map(|action| action.value().editable_text())
+            .unwrap_or_default(),
+        direct_action
+            .map(|action| execution_mode_name(action.execution_mode()))
             .unwrap_or_default(),
     ]
     .into_iter()
@@ -235,7 +239,7 @@ fn parse_record(line: &str) -> Option<(String, HistoryRecord)> {
         .split('\t')
         .map(unescape_field)
         .collect::<Option<Vec<_>>>()?;
-    if fields.len() != FIELD_COUNT {
+    if fields.len() != FIELD_COUNT && fields.len() != LEGACY_FIELD_COUNT {
         return None;
     }
 
@@ -248,9 +252,13 @@ fn parse_record(line: &str) -> Option<(String, HistoryRecord)> {
     let direct_action = if fields[7].is_empty() {
         None
     } else {
-        Some(parse_value(&fields[7], &fields[8])?)
+        let mode = fields
+            .get(9)
+            .and_then(|field| parse_execution_mode(field))
+            .unwrap_or(ExecutionMode::Foreground);
+        Some(Action::new(parse_value(&fields[7], &fields[8])?, mode))
     };
-    let candidate = Candidate::new(value, selector, direct_action).with_source(source);
+    let candidate = Candidate::new_with_action(value, selector, direct_action).with_source(source);
 
     Some((
         key.clone(),
@@ -281,6 +289,21 @@ fn policy_name(policy: InsertionPolicy) -> &'static str {
     match policy {
         InsertionPolicy::Raw => "raw",
         InsertionPolicy::Escaped => "escaped",
+    }
+}
+
+fn parse_execution_mode(mode: &str) -> Option<ExecutionMode> {
+    match mode {
+        "foreground" => Some(ExecutionMode::Foreground),
+        "detached" => Some(ExecutionMode::Detached),
+        _ => None,
+    }
+}
+
+fn execution_mode_name(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::Foreground => "foreground",
+        ExecutionMode::Detached => "detached",
     }
 }
 
