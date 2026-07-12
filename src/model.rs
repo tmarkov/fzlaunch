@@ -33,6 +33,7 @@ pub struct ExecutionPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     value: Value,
+    haystack: String,
     selector: char,
     direct_action: Option<Action>,
     source: CandidateSource,
@@ -263,13 +264,21 @@ impl Candidate {
     }
 
     pub fn new_with_action(value: Value, selector: char, direct_action: Option<Action>) -> Self {
+        let haystack = default_candidate_haystack(selector, &value);
         Self {
             value,
+            haystack: String::new(),
             selector,
             direct_action,
             source: CandidateSource::Generic,
             preference_score_millis: 0,
         }
+        .with_haystack(haystack)
+    }
+
+    pub fn with_haystack(mut self, haystack: impl Into<String>) -> Self {
+        self.haystack = haystack.into();
+        self
     }
 
     pub fn with_source(mut self, source: CandidateSource) -> Self {
@@ -292,6 +301,10 @@ impl Candidate {
         &self.value
     }
 
+    pub(crate) fn haystack(&self) -> &str {
+        &self.haystack
+    }
+
     pub(crate) fn direct_action(&self) -> Option<&Action> {
         self.direct_action.as_ref()
     }
@@ -307,6 +320,10 @@ impl Candidate {
     pub(crate) fn preference_score_millis(&self) -> u32 {
         self.preference_score_millis
     }
+}
+
+fn default_candidate_haystack(selector: char, value: &Value) -> String {
+    format!(";{}/{}", selector, value.editable_text())
 }
 
 #[cfg(test)]

@@ -905,10 +905,10 @@ mod tests {
         let file = root.join("paper.pdf");
         fs::write(&file, b"pdf").expect("test file should be written");
         let bin = temp_app_dir("app-disabled-sources-path");
-        fs::write(bin.join("fzlaunch-run-me"), b"#!/bin/sh\n")
+        fs::write(bin.join("fzlaunch-run@me"), b"#!/bin/sh\n")
             .expect("test executable should be written");
         fs::set_permissions(
-            bin.join("fzlaunch-run-me"),
+            bin.join("fzlaunch-run@me"),
             fs::Permissions::from_mode(0o755),
         )
         .expect("test executable permissions should be set");
@@ -927,7 +927,7 @@ mod tests {
             },
         );
         receive_all_candidates(&mut app_without_path).await;
-        app_without_path.update_input(Value::raw(";crun"));
+        app_without_path.update_input(Value::raw(";c@"));
         assert_eq!(selected_value(&app_without_path), None);
 
         let mut app_without_filesystem = App::start_with_config(

@@ -28,17 +28,11 @@ pub struct ResultRow {
 pub struct LauncherState {
     mode: InputMode,
     value: Value,
-    candidates: Vec<CandidateEntry>,
+    candidates: Vec<Candidate>,
     results: Vec<RankedCandidate>,
     selected_index: Option<usize>,
     queue: Queue,
     edit_origin: Option<Candidate>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CandidateEntry {
-    candidate: Candidate,
-    haystack: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,18 +70,17 @@ impl LauncherState {
         let mut new_results = Vec::new();
 
         for candidate in candidates {
-            let entry = CandidateEntry::new(candidate);
             let index = self.candidates.len();
 
             if self.mode == InputMode::Search {
                 if let Some(result) =
-                    rank_candidate(index, &entry, pattern.as_ref(), &mut matcher, &mut buf)
+                    rank_candidate(index, &candidate, pattern.as_ref(), &mut matcher, &mut buf)
                 {
                     new_results.push(result);
                 }
             }
 
-            self.candidates.push(entry);
+            self.candidates.push(candidate);
         }
 
         if new_results.is_empty() {
@@ -119,8 +112,8 @@ impl LauncherState {
             .candidates
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                rank_candidate(index, entry, pattern.as_ref(), &mut matcher, &mut buf)
+            .filter_map(|(index, candidate)| {
+                rank_candidate(index, candidate, pattern.as_ref(), &mut matcher, &mut buf)
             })
             .collect();
         self.results.sort_by_key(|result| Reverse(result.score));
@@ -200,7 +193,7 @@ impl LauncherState {
                 .selected_index
                 .and_then(|index| self.results.get(index))
                 .and_then(|result| self.candidates.get(result.index))
-                .and_then(|entry| entry.candidate.direct_action().cloned())
+                .and_then(|candidate| candidate.direct_action().cloned())
             {
                 self.queue.compose(direct_action);
             }
@@ -237,16 +230,16 @@ impl LauncherState {
 
         let input = SearchInput::parse(self.value.editable_text());
         match self.selected_entry() {
-            Some(entry) => Action::new(
-                append_search_terms(entry.candidate.value().clone(), &input.append),
-                selected_value_execution_mode(&entry.candidate),
+            Some(candidate) => Action::new(
+                append_search_terms(candidate.value().clone(), &input.append),
+                selected_value_execution_mode(candidate),
             ),
             None => Action::foreground(self.value.clone()),
         }
     }
 
     pub fn selected(&self) -> Option<Candidate> {
-        self.selected_entry().map(|entry| entry.candidate.clone())
+        self.selected_entry().cloned()
     }
 
     pub(crate) fn history_candidate(&self) -> Option<Candidate> {
@@ -287,30 +280,15 @@ impl LauncherState {
         self.rerank();
     }
 
-    fn selected_entry(&self) -> Option<&CandidateEntry> {
+    fn selected_entry(&self) -> Option<&Candidate> {
         self.selected_index
             .and_then(|index| self.results.get(index))
             .and_then(|result| self.candidates.get(result.index))
     }
 }
 
-impl CandidateEntry {
-    fn new(candidate: Candidate) -> Self {
-        let haystack = format!(
-            ";{}/{}",
-            candidate.selector(),
-            candidate.value().editable_text()
-        );
-
-        Self {
-            candidate,
-            haystack,
-        }
-    }
-}
-
-fn preference_score_adjustment(entry: &CandidateEntry) -> u64 {
-    entry.candidate.preference_score_millis() as u64
+fn preference_score_adjustment(candidate: &Candidate) -> u64 {
+    candidate.preference_score_millis() as u64
 }
 
 impl SearchInput {
@@ -362,7 +340,7 @@ fn selected_value_execution_mode(candidate: &Candidate) -> ExecutionMode {
 
 fn rank_candidate(
     index: usize,
-    entry: &CandidateEntry,
+    candidate: &Candidate,
     pattern: Option<&Pattern>,
     matcher: &mut Matcher,
     buf: &mut Vec<char>,
@@ -370,11 +348,14 @@ fn rank_candidate(
     let (score, match_indices) = match pattern {
         Some(pattern) => {
             let mut indices = Vec::new();
-            let score =
-                pattern.indices(Utf32Str::new(&entry.haystack, buf), matcher, &mut indices)? as u64
-                    * MATCH_SCORE_SCALE
-                    + preference_score_adjustment(entry)
-                    + length_score_adjustment(entry);
+            let score = pattern.indices(
+                Utf32Str::new(candidate.haystack(), buf),
+                matcher,
+                &mut indices,
+            )? as u64
+                * MATCH_SCORE_SCALE
+                + preference_score_adjustment(candidate)
+                + length_score_adjustment(candidate);
             indices.sort_unstable();
             indices.dedup();
             (
@@ -382,22 +363,21 @@ fn rank_candidate(
                 indices.into_iter().map(|index| index as usize).collect(),
             )
         }
-        None => (preference_score_adjustment(entry), Vec::new()),
+        None => (preference_score_adjustment(candidate), Vec::new()),
     };
 
     Some(RankedCandidate {
         index,
         score,
         row: ResultRow {
-            haystack: entry.haystack.clone(),
+            haystack: candidate.haystack().to_string(),
             match_indices,
         },
     })
 }
 
-fn length_score_adjustment(entry: &CandidateEntry) -> u64 {
-    MAX_LENGTH_SCORE_BIAS
-        .saturating_sub(entry.candidate.value().editable_text().chars().count() as u64)
+fn length_score_adjustment(candidate: &Candidate) -> u64 {
+    MAX_LENGTH_SCORE_BIAS.saturating_sub(candidate.value().editable_text().chars().count() as u64)
 }
 
 fn merge_ranked_results(
@@ -612,6 +592,46 @@ mod tests {
                 haystack: ";f//home/me/paper.pdf".to_string(),
                 match_indices: vec![12, 13, 14, 15, 16],
             }]
+        );
+    }
+
+    #[test]
+    fn search_uses_candidate_haystack_but_current_uses_value() {
+        let mut state = LauncherState::default();
+
+        state.feed([
+            Candidate::new(Value::escaped("/home/me/project/src/cache.rs"), 'r', None)
+                .with_haystack(";r src/cache.rs:45 fixed memory leak in eviction path"),
+        ]);
+        state.update_input(Value::raw("memory leak ;r"));
+
+        assert_eq!(
+            selected_value(&state),
+            Some(Value::escaped("/home/me/project/src/cache.rs"))
+        );
+        let results = state.results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].haystack,
+            ";r src/cache.rs:45 fixed memory leak in eviction path"
+        );
+    }
+
+    #[test]
+    fn direct_action_composes_selected_value_not_haystack() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(
+            Value::raw("7"),
+            '=',
+            Some(Value::raw("printf %s {} | wl-copy")),
+        )
+        .with_haystack(";= 3 + 4 = 7")]);
+        state.update_input(Value::raw("3 + 4 ;="));
+
+        assert_eq!(
+            state.press_enter(),
+            Some(Value::raw("printf %s 7 | wl-copy").into())
         );
     }
 
