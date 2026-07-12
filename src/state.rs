@@ -94,6 +94,20 @@ impl LauncherState {
         }
     }
 
+    pub fn replace_candidates_from_source(
+        &mut self,
+        source: CandidateSource,
+        candidates: impl IntoIterator<Item = Candidate>,
+    ) {
+        self.candidates
+            .retain(|candidate| candidate.source() != source);
+        self.candidates.extend(candidates);
+
+        if self.mode == InputMode::Search {
+            self.rerank();
+        }
+    }
+
     pub fn update_input(&mut self, value: Value) {
         self.value = value;
 
@@ -231,7 +245,7 @@ impl LauncherState {
         let input = SearchInput::parse(self.value.editable_text());
         match self.selected_entry() {
             Some(candidate) => Action::new(
-                append_search_terms(candidate.value().clone(), &input.append),
+                selected_value_with_append_terms(candidate, &input.append),
                 selected_value_execution_mode(candidate),
             ),
             None => Action::foreground(self.value.clone()),
@@ -252,10 +266,12 @@ impl LauncherState {
             return self
                 .edit_origin
                 .as_ref()
+                .filter(|origin| is_history_recordable(origin))
                 .map(|origin| edited_history_candidate(current, origin));
         }
 
         match self.selected() {
+            Some(selected) if !is_history_recordable(&selected) => None,
             Some(selected) if selected.value() == &current => Some(selected),
             Some(selected) => Some(edited_history_candidate(current, &selected)),
             None => None,
@@ -325,6 +341,18 @@ fn append_search_terms(value: Value, append: &[String]) -> Value {
         shell::render_value(&value),
         append.join(" ")
     ))
+}
+
+fn selected_value_with_append_terms(candidate: &Candidate, append: &[String]) -> Value {
+    if candidate.source() == CandidateSource::Calculator {
+        return candidate.value().clone();
+    }
+
+    append_search_terms(candidate.value().clone(), append)
+}
+
+fn is_history_recordable(candidate: &Candidate) -> bool {
+    candidate.source() != CandidateSource::Calculator
 }
 
 fn selected_value_execution_mode(candidate: &Candidate) -> ExecutionMode {
@@ -633,6 +661,27 @@ mod tests {
             state.press_enter(),
             Some(Value::raw("printf %s 7 | wl-copy").into())
         );
+    }
+
+    #[test]
+    fn calculator_choices_are_not_history_candidates() {
+        let mut state = LauncherState::default();
+
+        state.feed([Candidate::new(
+            Value::raw("7"),
+            '=',
+            Some(Value::raw("printf %s {} | wl-copy")),
+        )
+        .with_source(CandidateSource::Calculator)
+        .with_haystack(";= 3 + 4 = 7")]);
+        state.update_input(Value::raw("3 + 4 ;="));
+
+        assert_eq!(state.history_candidate(), None);
+
+        state.press_backtick();
+        state.update_input(Value::raw("8"));
+
+        assert_eq!(state.history_candidate(), None);
     }
 
     #[test]

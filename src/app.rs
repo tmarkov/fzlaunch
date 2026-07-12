@@ -9,7 +9,7 @@ use crate::history::History;
 use crate::model::{Candidate, CandidateSource, ExecutionMode, ExecutionPlan, Queue, Value};
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
-use crate::sources::{AsyncSource, CandidateReceiver, Executables, FilesystemRoot};
+use crate::sources::{AsyncSource, Calculator, CandidateReceiver, Executables, FilesystemRoot};
 use crate::state::LauncherState;
 use crate::ui::tui;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -21,6 +21,7 @@ pub struct App {
     state: LauncherState,
     config: Config,
     history: History,
+    calculator: Option<Calculator>,
     candidate_receiver: CandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
     preview_command: Option<String>,
@@ -172,7 +173,13 @@ impl App {
             )) as Box<dyn AsyncSource>);
         }
 
-        Self::with_sources_and_config_and_history(sources, config, history)
+        let calculator = config
+            .sources
+            .calculator
+            .enabled
+            .then(|| Calculator::new(config.sources.calculator.clone()));
+
+        Self::with_sources_and_config_and_history(sources, config, history, calculator)
     }
 
     #[cfg(test)]
@@ -185,13 +192,19 @@ impl App {
         sources: impl IntoIterator<Item = Box<dyn AsyncSource>>,
         config: Config,
     ) -> Self {
-        Self::with_sources_and_config_and_history(sources, config, History::default())
+        let calculator = config
+            .sources
+            .calculator
+            .enabled
+            .then(|| Calculator::new(config.sources.calculator.clone()));
+        Self::with_sources_and_config_and_history(sources, config, History::default(), calculator)
     }
 
     fn with_sources_and_config_and_history(
         sources: impl IntoIterator<Item = Box<dyn AsyncSource>>,
         config: Config,
         history: History,
+        calculator: Option<Calculator>,
     ) -> Self {
         let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
         let (preview_sender, preview_receiver) = tokio::sync::mpsc::channel(8);
@@ -209,6 +222,7 @@ impl App {
             state,
             config,
             history,
+            calculator,
             candidate_receiver,
             source_tasks,
             preview_command: None,
@@ -220,6 +234,7 @@ impl App {
 
     pub fn update_input(&mut self, value: Value) {
         self.state.update_input(value);
+        self.refresh_calculator_candidates();
     }
 
     pub fn select_next(&mut self) {
@@ -232,16 +247,20 @@ impl App {
 
     pub fn press_backtick(&mut self) {
         self.state.press_backtick();
+        self.clear_calculator_candidates();
     }
 
     pub fn press_tab(&mut self) {
         self.record_history_choice();
         self.state.press_tab();
+        self.refresh_calculator_candidates();
     }
 
     pub fn press_enter(&mut self) -> Option<ExecutionPlan> {
         self.record_history_choice();
-        self.state.press_enter()
+        let command = self.state.press_enter();
+        self.refresh_calculator_candidates();
+        command
     }
 
     pub fn state(&self) -> &LauncherState {
@@ -338,6 +357,27 @@ impl App {
         self.state.feed(candidates);
     }
 
+    fn refresh_calculator_candidates(&mut self) {
+        let candidates = if self.state.mode() == crate::state::InputMode::Search {
+            self.calculator
+                .as_ref()
+                .map(|calculator| calculator.candidates(self.state.value().editable_text()))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let candidates = candidates
+            .into_iter()
+            .map(|candidate| self.history.apply_preference(candidate));
+        self.state
+            .replace_candidates_from_source(CandidateSource::Calculator, candidates);
+    }
+
+    fn clear_calculator_candidates(&mut self) {
+        self.state
+            .replace_candidates_from_source(CandidateSource::Calculator, []);
+    }
+
     fn record_history_choice(&mut self) {
         let Some(candidate) = self.state.history_candidate() else {
             return;
@@ -356,6 +396,7 @@ fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Op
             candidate.value().editable_text(),
             &config.sources.filesystem,
         ),
+        CandidateSource::Calculator => None,
         CandidateSource::History => None,
     }?;
 
@@ -459,7 +500,9 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use crate::config::{Config, FilesystemSourceConfig, PathSourceConfig, SourceConfig};
+    use crate::config::{
+        CalculatorSourceConfig, Config, FilesystemSourceConfig, PathSourceConfig, SourceConfig,
+    };
     use crate::model::Candidate;
     use crate::sources::CandidateSender;
     use crate::state::InputMode;
@@ -768,6 +811,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn app_calculator_source_evaluates_standalone_trigger() {
+        let mut app = App::with_sources([]);
+
+        app.update_input(Value::raw("3 + 4 ;="));
+
+        assert_eq!(selected_value(&app), Some(Value::raw("7")));
+        assert_eq!(app.state().results()[0].haystack, ";= 3 + 4 = 7");
+        assert_eq!(
+            app.press_enter(),
+            Some(Value::raw("printf %s 7 | wl-copy").into())
+        );
+    }
+
+    #[test]
+    fn app_calculator_source_uses_terms_after_trigger() {
+        let mut app = App::with_sources([]);
+
+        app.update_input(Value::raw("3 + 4 ;= + 5"));
+
+        assert_eq!(selected_value(&app), Some(Value::raw("12")));
+        assert_eq!(app.state().results()[0].haystack, ";= 3 + 4 + 5 = 12");
+    }
+
+    #[test]
+    fn app_calculator_source_subtraction_is_not_an_append_term() {
+        let mut app = App::with_sources([]);
+
+        app.update_input(Value::raw("7 - 9 ;="));
+
+        assert_eq!(selected_value(&app), Some(Value::raw("-2")));
+        assert_eq!(
+            app.press_enter(),
+            Some(Value::raw("printf %s -2 | wl-copy").into())
+        );
+    }
+
+    #[test]
+    fn app_calculator_source_requires_standalone_trigger() {
+        let mut app = App::with_sources([]);
+
+        app.update_input(Value::raw("3+4;=+5"));
+
+        assert_eq!(selected_value(&app), None);
+    }
+
+    #[test]
+    fn app_calculator_source_replaces_stale_results() {
+        let mut app = App::with_sources([]);
+
+        app.update_input(Value::raw("3 + 4 ;="));
+        assert_eq!(selected_value(&app), Some(Value::raw("7")));
+
+        app.update_input(Value::raw("3 + 4"));
+
+        assert_eq!(selected_value(&app), None);
+        assert_eq!(app.state().results(), Vec::new());
+    }
+
+    #[test]
+    fn app_skips_disabled_calculator_source() {
+        let mut app = App::with_sources_and_config(
+            [],
+            Config {
+                sources: SourceConfig {
+                    calculator: CalculatorSourceConfig {
+                        enabled: false,
+                        ..CalculatorSourceConfig::default()
+                    },
+                    ..SourceConfig::default()
+                },
+            },
+        );
+
+        app.update_input(Value::raw("3 + 4 ;="));
+
+        assert_eq!(selected_value(&app), None);
+    }
+
     #[tokio::test]
     async fn app_records_selected_choices_on_tab_and_enter() {
         let root = temp_app_dir("app-history-record");
@@ -780,6 +902,7 @@ mod tests {
             [Box::new(StaticSource::new([bash.clone(), zsh.clone()])) as Box<dyn AsyncSource>],
             Config::default(),
             History::load_from_path(&path).expect("history should load"),
+            None,
         );
 
         assert!(app.receive_candidates().await);
@@ -803,6 +926,7 @@ mod tests {
             [Box::new(StaticSource::new([mv])) as Box<dyn AsyncSource>],
             Config::default(),
             History::load_from_path(&path).expect("history should load"),
+            None,
         );
 
         assert!(app.receive_candidates().await);
@@ -815,6 +939,7 @@ mod tests {
             Vec::<Box<dyn AsyncSource>>::new(),
             Config::default(),
             History::load_from_path(&path).expect("history should reload"),
+            None,
         );
         app.update_input(Value::raw(";cmv"));
 
@@ -877,10 +1002,10 @@ mod tests {
         let file = root.join("paper.pdf");
         fs::write(&file, b"pdf").expect("test file should be written");
         let bin = temp_app_dir("app-default-path");
-        fs::write(bin.join("fzlaunch-run-me"), b"#!/bin/sh\n")
+        fs::write(bin.join("fzlaunch-run@me"), b"#!/bin/sh\n")
             .expect("test executable should be written");
         fs::set_permissions(
-            bin.join("fzlaunch-run-me"),
+            bin.join("fzlaunch-run@me"),
             fs::Permissions::from_mode(0o755),
         )
         .expect("test executable permissions should be set");
@@ -892,10 +1017,10 @@ mod tests {
             Value::escaped(file.to_str().expect("path should be utf-8"))
         );
 
-        app.update_input(Value::raw(";crun"));
+        app.update_input(Value::raw(";c@"));
         assert_eq!(
             receive_until_selected(&mut app).await,
-            Value::raw("fzlaunch-run-me")
+            Value::raw("fzlaunch-run@me")
         );
     }
 

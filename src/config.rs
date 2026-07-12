@@ -24,6 +24,11 @@ image_preview_command = "file {}"
 archive_preview_command = "file {}"
 media_preview_command = "file {}"
 binary_preview_command = ""
+
+[sources.calculator]
+enabled = true
+direct_action = "printf %s {} | wl-copy"
+direct_action_execution = "foreground"
 "#;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,6 +40,7 @@ pub struct Config {
 pub struct SourceConfig {
     pub path: PathSourceConfig,
     pub filesystem: FilesystemSourceConfig,
+    pub calculator: CalculatorSourceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +61,12 @@ pub struct FilesystemSourceConfig {
     pub archive_preview_command: Option<Value>,
     pub media_preview_command: Option<Value>,
     pub binary_preview_command: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalculatorSourceConfig {
+    pub enabled: bool,
+    pub direct_action: Action,
 }
 
 #[derive(Debug)]
@@ -149,6 +161,15 @@ impl Default for FilesystemSourceConfig {
     }
 }
 
+impl Default for CalculatorSourceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            direct_action: Action::foreground(Value::raw("printf %s {} | wl-copy")),
+        }
+    }
+}
+
 impl From<ConfigFile> for Config {
     fn from(file: ConfigFile) -> Self {
         let defaults = Self::default();
@@ -166,6 +187,10 @@ impl From<ConfigFile> for Config {
                     .filesystem
                     .map(FilesystemSourceConfig::from)
                     .unwrap_or(defaults.sources.filesystem),
+                calculator: sources
+                    .calculator
+                    .map(CalculatorSourceConfig::from)
+                    .unwrap_or(defaults.sources.calculator),
             },
         }
     }
@@ -247,6 +272,28 @@ impl From<FilesystemSourceConfigFile> for FilesystemSourceConfig {
     }
 }
 
+impl From<CalculatorSourceConfigFile> for CalculatorSourceConfig {
+    fn from(file: CalculatorSourceConfigFile) -> Self {
+        let defaults = Self::default();
+
+        Self {
+            enabled: file.enabled.unwrap_or(defaults.enabled),
+            direct_action: file
+                .direct_action
+                .map(|value| {
+                    Action::new(
+                        Value::raw(value),
+                        file.direct_action_execution
+                            .as_deref()
+                            .and_then(parse_execution_mode)
+                            .unwrap_or(defaults.direct_action.execution_mode()),
+                    )
+                })
+                .unwrap_or(defaults.direct_action),
+        }
+    }
+}
+
 fn preview_command(configured: Option<String>, default: Option<Value>) -> Option<Value> {
     match configured {
         Some(command) if command.is_empty() => None,
@@ -298,6 +345,7 @@ struct ConfigFile {
 struct SourceConfigFile {
     path: Option<PathSourceConfigFile>,
     filesystem: Option<FilesystemSourceConfigFile>,
+    calculator: Option<CalculatorSourceConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -320,6 +368,13 @@ struct FilesystemSourceConfigFile {
     archive_preview_command: Option<String>,
     media_preview_command: Option<String>,
     binary_preview_command: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CalculatorSourceConfigFile {
+    enabled: Option<bool>,
+    direct_action: Option<String>,
+    direct_action_execution: Option<String>,
 }
 
 fn parse_execution_mode(mode: &str) -> Option<ExecutionMode> {
@@ -375,6 +430,10 @@ mod tests {
                         media_preview_command: Some(Value::raw("file {}")),
                         binary_preview_command: None,
                     },
+                    calculator: CalculatorSourceConfig {
+                        enabled: true,
+                        direct_action: Action::foreground(Value::raw("printf %s {} | wl-copy")),
+                    },
                 },
             }
         );
@@ -429,6 +488,10 @@ image_preview_command = "show-image {}"
 archive_preview_command = "show-archive {}"
 media_preview_command = "show-media {}"
 binary_preview_command = "show-binary {}"
+
+[sources.calculator]
+enabled = false
+direct_action = "copy-result {}"
 "#,
         )
         .expect("test config should be written");
@@ -452,6 +515,10 @@ binary_preview_command = "show-binary {}"
                         archive_preview_command: Some(Value::raw("show-archive {}")),
                         media_preview_command: Some(Value::raw("show-media {}")),
                         binary_preview_command: Some(Value::raw("show-binary {}")),
+                    },
+                    calculator: CalculatorSourceConfig {
+                        enabled: false,
+                        direct_action: Action::foreground(Value::raw("copy-result {}")),
                     },
                 },
             }
@@ -480,6 +547,7 @@ preview_command = "help {}"
                         ..PathSourceConfig::default()
                     },
                     filesystem: FilesystemSourceConfig::default(),
+                    calculator: CalculatorSourceConfig::default(),
                 },
             }
         );

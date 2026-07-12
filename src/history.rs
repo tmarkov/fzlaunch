@@ -71,6 +71,10 @@ impl History {
     }
 
     pub fn score(&self, candidate: &Candidate) -> u64 {
+        if candidate.source() == CandidateSource::Calculator {
+            return 0;
+        }
+
         let now = now_secs();
         self.records
             .get(&candidate_key(candidate))
@@ -102,6 +106,10 @@ impl History {
     }
 
     pub fn record(&mut self, candidate: &Candidate) -> Result<u64, HistoryError> {
+        if candidate.source() == CandidateSource::Calculator {
+            return Ok(0);
+        }
+
         let now = now_secs();
         let key = candidate_key(candidate);
         let previous_score = self
@@ -312,6 +320,7 @@ fn parse_source(source: &str) -> Option<CandidateSource> {
         "generic" => Some(CandidateSource::Generic),
         "path" => Some(CandidateSource::PathExecutable),
         "filesystem" => Some(CandidateSource::FilesystemPath),
+        "calculator" => Some(CandidateSource::Calculator),
         "history" => Some(CandidateSource::History),
         _ => None,
     }
@@ -322,6 +331,7 @@ fn source_name(source: CandidateSource) -> &'static str {
         CandidateSource::Generic => "generic",
         CandidateSource::PathExecutable => "path",
         CandidateSource::FilesystemPath => "filesystem",
+        CandidateSource::Calculator => "calculator",
         CandidateSource::History => "history",
     }
 }
@@ -404,6 +414,31 @@ mod tests {
         let history = History::load_from_path(&path).expect("history should reload");
 
         assert!(history.score(&candidate) > 0);
+    }
+
+    #[test]
+    fn calculator_candidates_are_not_recorded_or_scored() {
+        let root = TempDir::new("history-calculator");
+        let path = root.join("history.tsv");
+        let candidate = Candidate::new(
+            Value::raw("7"),
+            '=',
+            Some(Value::raw("printf %s {} | wl-copy")),
+        )
+        .with_source(CandidateSource::Calculator)
+        .with_haystack(";= 3 + 4 = 7");
+        let mut history = History::load_from_path(&path).expect("history should load");
+
+        assert_eq!(
+            history
+                .record(&candidate)
+                .expect("history should ignore calculator candidate"),
+            0
+        );
+
+        let history = History::load_from_path(&path).expect("history should reload");
+        assert_eq!(history.score(&candidate), 0);
+        assert!(history.candidates().is_empty());
     }
 
     #[test]

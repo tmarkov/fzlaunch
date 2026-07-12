@@ -45,6 +45,7 @@ pub enum CandidateSource {
     Generic,
     PathExecutable,
     FilesystemPath,
+    Calculator,
     History,
 }
 

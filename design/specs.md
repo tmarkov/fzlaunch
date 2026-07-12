@@ -499,18 +499,63 @@ The built-in searchable values are:
 1. Files
 2. Directories
 3. Executables
+4. Calculator results
 
 Search text can include a selector:
 
 1. Files: `;f`
 2. Directories: `;d`
 3. Executables: `;c`
+4. Calculator: `;=`
 
 Examples:
 
 1. `;fpaper` searches files for `paper`.
 2. `;ddocres` searches directories for `docres`.
 3. `;creadl` searches executables for `readl`.
+
+The calculator is a triggered source. It only produces a result when `;=` appears
+as a standalone whitespace-delimited token. The expression is the search text
+with the `;=` token removed.
+
+Examples:
+
+```text
+3 + 4 ;=
+```
+
+produces a result whose searchable text is:
+
+```text
+;= 3 + 4 = 7
+```
+
+and whose inserted value is:
+
+```text
+7
+```
+
+Pressing `[ent]` on the calculator result copies the value using the configured
+calculator direct action.
+
+Terms after the trigger are still part of the expression:
+
+```text
+3 + 4 ;= + 5
+```
+
+produces:
+
+```text
+;= 3 + 4 + 5 = 12
+```
+
+Non-standalone trigger text does not activate the calculator:
+
+```text
+3+4;=+5
+```
 
 # Sorting
 
