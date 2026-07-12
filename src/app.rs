@@ -230,8 +230,8 @@ impl App {
         self.state.select_previous();
     }
 
-    pub fn press_tilde(&mut self) {
-        self.state.press_tilde();
+    pub fn press_backtick(&mut self) {
+        self.state.press_backtick();
     }
 
     pub fn press_tab(&mut self) {
@@ -757,7 +757,7 @@ mod tests {
         app.update_input(Value::raw(";cnvim"));
         assert_eq!(selected_value(&app), Some(Value::raw("nvim")));
 
-        app.press_tilde();
+        app.press_backtick();
         assert_eq!(app.state().mode(), InputMode::Edit);
         assert_eq!(app.state().value(), Value::raw("nvim"));
 
@@ -807,7 +807,7 @@ mod tests {
 
         assert!(app.receive_candidates().await);
         app.update_input(Value::raw(";cmv"));
-        app.press_tilde();
+        app.press_backtick();
         app.update_input(Value::raw("mv {} {}"));
         app.press_tab();
 

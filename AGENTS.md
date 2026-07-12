@@ -7,7 +7,7 @@ Development guidelines for future work on `fzlaunch`.
 1. Prefer minimal rule surface.
    Use one broad, consistent rule instead of several narrow rules. Exceptions need
    strong justification and explicit tests. The known explicit exception is
-   initial `[tilde]`, which enters raw edit mode without copying the selected
+   initial `[backtick]`, which enters raw edit mode without copying the selected
    result.
 
 2. Let behavior drive abstraction.
@@ -52,7 +52,7 @@ Development guidelines for future work on `fzlaunch`.
 ## API Practices
 
 1. Public methods should express domain operations, such as `feed`,
-   `update_input`, `press_tilde`, `current`, `compose`, and `compile`.
+   `update_input`, `press_backtick`, `current`, `compose`, and `compile`.
 
 2. Avoid test-only control APIs.
    If a test needs to fake internal state directly, the public model is probably
@@ -91,7 +91,7 @@ nix develop -c cargo clippy --all-targets -- -D warnings
 ## Design Practices
 
 1. Avoid heuristics for user intent.
-   Prefer explicit mechanisms such as initial `[tilde]` over guessing whether
+   Prefer explicit mechanisms such as initial `[backtick]` over guessing whether
    text is a shell command.
 
 2. Keep mode semantics sharp.

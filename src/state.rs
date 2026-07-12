@@ -161,7 +161,7 @@ impl LauncherState {
         }
     }
 
-    pub fn press_tilde(&mut self) {
+    pub fn press_backtick(&mut self) {
         let edit_origin = if self.value.editable_text().is_empty() {
             None
         } else {
@@ -446,17 +446,17 @@ mod tests {
     }
 
     #[test]
-    fn initial_tilde_enters_edit_mode_with_empty_raw_buffer() {
+    fn initial_backtick_enters_edit_mode_with_empty_raw_buffer() {
         let mut state = LauncherState::default();
 
-        state.press_tilde();
+        state.press_backtick();
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw(""));
     }
 
     #[test]
-    fn tilde_with_search_input_seeds_edit_mode_from_selected_match() {
+    fn backtick_with_search_input_seeds_edit_mode_from_selected_match() {
         let mut state = LauncherState::default();
 
         state.feed([
@@ -465,7 +465,7 @@ mod tests {
         ]);
         state.update_input(Value::raw(";d"));
 
-        state.press_tilde();
+        state.press_backtick();
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::escaped("/home/me/Documents/research"));
@@ -473,13 +473,13 @@ mod tests {
     }
 
     #[test]
-    fn tilde_with_append_terms_seeds_edit_mode_from_selected_match_plus_append_terms() {
+    fn backtick_with_append_terms_seeds_edit_mode_from_selected_match_plus_append_terms() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("gnome-terminal"), 'c', None)]);
         state.update_input(Value::raw("gterm -c {}"));
 
-        state.press_tilde();
+        state.press_backtick();
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("gnome-terminal -c {}"));
@@ -550,7 +550,7 @@ mod tests {
             None,
         )]);
         state.update_input(Value::raw(";d"));
-        state.press_tilde();
+        state.press_backtick();
         state.update_input(Value::escaped("/home/me/Documents/paper.pdf"));
 
         assert_eq!(
@@ -896,7 +896,7 @@ mod tests {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
-        state.press_tilde();
+        state.press_backtick();
         state.update_input(Value::raw("f"));
 
         assert_eq!(state.mode(), InputMode::Edit);
@@ -931,7 +931,7 @@ mod tests {
             Candidate::new(Value::raw("firefox"), 'c', None),
             Candidate::new(Value::escaped("/home/me/firefox.pdf"), 'f', None),
         ]);
-        state.press_tilde();
+        state.press_backtick();
 
         state.update_input(Value::raw(";f firefox"));
 
@@ -942,11 +942,11 @@ mod tests {
     }
 
     #[test]
-    fn tilde_with_empty_input_ignores_selected_match() {
+    fn backtick_with_empty_input_ignores_selected_match() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
-        state.press_tilde();
+        state.press_backtick();
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw(""));
@@ -954,13 +954,13 @@ mod tests {
     }
 
     #[test]
-    fn tilde_with_no_selected_match_keeps_typed_raw_input() {
+    fn backtick_with_no_selected_match_keeps_typed_raw_input() {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("firefox"), 'c', None)]);
         state.update_input(Value::raw("ps aux | grep firefox"));
 
-        state.press_tilde();
+        state.press_backtick();
 
         assert_eq!(state.mode(), InputMode::Edit);
         assert_eq!(state.value(), Value::raw("ps aux | grep firefox"));
@@ -986,7 +986,7 @@ mod tests {
         let mut state = LauncherState::default();
 
         state.feed([Candidate::new(Value::raw("mv"), 'c', None)]);
-        state.press_tilde();
+        state.press_backtick();
 
         state.update_input(Value::raw("{"));
 
@@ -1274,10 +1274,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_after_initial_tilde_executes_typed_raw_command() {
+    fn enter_after_initial_backtick_executes_typed_raw_command() {
         let mut state = LauncherState::default();
 
-        state.press_tilde();
+        state.press_backtick();
         state.update_input(Value::raw("ps aux | grep firefox"));
 
         assert_eq!(

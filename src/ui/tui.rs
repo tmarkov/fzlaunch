@@ -136,8 +136,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             app.select_next();
             KeyAction::Continue
         }
-        KeyCode::Char('~') => {
-            app.press_tilde();
+        KeyCode::Char('`') => {
+            app.press_backtick();
             KeyAction::Continue
         }
         KeyCode::Backspace => {
@@ -550,6 +550,30 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(text, ";c bash");
+    }
+
+    #[test]
+    fn backtick_enters_edit_mode() {
+        let mut app = App::with_sources([]);
+
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('`'))),
+            KeyAction::Continue
+        );
+        assert_eq!(app.state().mode(), InputMode::Edit);
+        assert_eq!(app.state().value(), Value::raw(""));
+    }
+
+    #[test]
+    fn tilde_is_text_input() {
+        let mut app = App::with_sources([]);
+
+        assert_eq!(
+            handle_key(&mut app, key(KeyCode::Char('~'))),
+            KeyAction::Continue
+        );
+        assert_eq!(app.state().mode(), InputMode::Search);
+        assert_eq!(app.state().value(), Value::raw("~"));
     }
 
     #[test]

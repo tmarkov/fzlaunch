@@ -32,9 +32,9 @@ When started, `fzlaunch` opens a TUI with:
 Everything that can be selected, queued, inserted, or executed behaves as a
 value.
 
-When a value is edited with `[tilde]`, the search box shows editable text. When a
-value is inserted into a command, it is inserted either verbatim or with POSIX
-shell quoting.
+When a value is edited with `[backtick]`, the search box shows editable text.
+When a value is inserted into a command, it is inserted either verbatim or with
+POSIX shell quoting.
 
 Examples:
 
@@ -118,17 +118,17 @@ ps aux | grep firefox[ent]
 ```
 
 If this matches a strangely named file, the selected file would normally win. To
-force direct shell entry, use initial `[tilde]`:
+force direct shell entry, use initial `[backtick]`:
 
 ```text
-[tilde]ps aux | grep firefox[ent]
+[backtick]ps aux | grep firefox[ent]
 ```
 
 ## Edit mode
 
-`[tilde]` enters edit mode.
+`[backtick]` enters edit mode.
 
-Normally, `[tilde]`:
+Normally, `[backtick]`:
 
 1. Copies the selected value's editable text into the search box.
 2. Preserves how that value is inserted into shell text.
@@ -139,7 +139,7 @@ Subsequent typing edits that value directly. It does not produce new matches.
 Example:
 
 ```text
-;ddocres[tilde]/2024-polynomial-interpolation.pdf
+;ddocres[backtick]/2024-polynomial-interpolation.pdf
 ```
 
 If `;ddocres` selects `/home/me/Documents/research`, the search box becomes:
@@ -154,14 +154,14 @@ The edited directory is still inserted as a quoted path:
 '/home/me/Documents/research/2024-polynomial-interpolation.pdf'
 ```
 
-The one explicit exception is initial `[tilde]`: if the search box is empty when
-`[tilde]` is pressed, it enters edit mode with an empty buffer and does not copy
-the selected result.
+The one explicit exception is initial `[backtick]`: if the search box is empty
+when `[backtick]` is pressed, it enters edit mode with an empty buffer and does
+not copy the selected result.
 
 Example:
 
 ```text
-[tilde]ps aux | grep firefox[ent]
+[backtick]ps aux | grep firefox[ent]
 ```
 
 executes the typed shell command.
@@ -343,7 +343,7 @@ Suppose a selected file has this editable text:
 /home/me/a'b.txt
 ```
 
-After `[tilde]`, the search box shows the editable path. It does not show the
+After `[backtick]`, the search box shows the editable path. It does not show the
 shell-escaped form.
 
 When the value is queued or previewed as final shell text, it is shown escaped:
@@ -380,10 +380,10 @@ firefox --private-window
 ## Type a shell command directly
 
 ```text
-[tilde]ps aux | grep firefox[ent]
+[backtick]ps aux | grep firefox[ent]
 ```
 
-Initial `[tilde]` enters edit mode with an empty buffer. The command
+Initial `[backtick]` enters edit mode with an empty buffer. The command
 executes as typed:
 
 ```sh
@@ -401,14 +401,14 @@ Suppose:
 Then:
 
 ```text
-2024pdf[tab]secm[tilde] {} {}[tab];ddocres[tilde]/2024-polynomial-interpolation.pdf[ent]
+2024pdf[tab]secm[backtick] {} {}[tab];ddocres[backtick]/2024-polynomial-interpolation.pdf[ent]
 ```
 
 Step by step:
 
 1. `2024pdf[tab]` queues the downloaded PDF so it will be inserted as a quoted
    path.
-2. `secm[tilde]` seeds the buffer with `securemove`.
+2. `secm[backtick]` seeds the buffer with `securemove`.
 3. ` {} {}` edits it into a command with two slots.
 4. `[tab]` fills the first slot from the queue and queues:
 
@@ -416,7 +416,7 @@ Step by step:
 securemove '/home/me/Downloads/2024-8234.pdf' {}
 ```
 
-5. `;ddocres[tilde]` enters edit mode with the selected directory.
+5. `;ddocres[backtick]` enters edit mode with the selected directory.
 6. `/2024-polynomial-interpolation.pdf` edits that value.
 7. `[ent]` fills the remaining slot and executes:
 
@@ -523,8 +523,8 @@ reachable with very few typed characters.
 | --- | --- |
 | Text input | Updates search in search mode; edits buffer in edit mode |
 | `[up]` / `[down]` | Move result selection |
-| `[tilde]` | Enter edit mode; normally seed from selected value |
-| Initial `[tilde]` | Enter edit mode with an empty buffer that executes as typed |
+| `[backtick]` | Enter edit mode; normally seed from selected value |
+| Initial `[backtick]` | Enter edit mode with an empty buffer that executes as typed |
 | `{` in search mode | Resolve current value, enter edit mode, then insert `{` |
 | `[tab]` | Resolve, compose, and queue |
 | `[ent]` | Resolve, compose, and execute if complete |

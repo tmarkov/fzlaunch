@@ -812,12 +812,12 @@ mod tests {
         state.press_tab();
 
         state.update_input(Value::raw(";creadl"));
-        state.press_tilde();
+        state.press_backtick();
         state.update_input(Value::raw("readlink -f {}"));
         state.press_tab();
 
         state.update_input(Value::raw(";cnvim"));
-        state.press_tilde();
+        state.press_backtick();
         state.update_input(Value::raw("nvim $({})"));
 
         assert_eq!(
