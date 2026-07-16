@@ -29,22 +29,18 @@ impl Calculator {
 }
 
 fn calculator_expression(input: &str) -> Option<String> {
-    let mut triggered = false;
-    let terms = input
-        .split_whitespace()
-        .filter(|term| {
-            if *term == ";=" {
-                triggered = true;
-                false
-            } else {
-                true
-            }
-        })
-        .collect::<Vec<_>>();
+    let terms = input.split_whitespace().collect::<Vec<_>>();
+    let trigger_index = terms.iter().rposition(|term| *term == ";=")?;
 
-    triggered
-        .then(|| terms.join(" "))
-        .filter(|expression| !expression.is_empty())
+    Some(
+        terms[..trigger_index]
+            .iter()
+            .copied()
+            .filter(|term| *term != ";=")
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+    .filter(|expression| !expression.is_empty())
 }
 
 fn calculate(expression: &str) -> Option<String> {
@@ -201,9 +197,23 @@ mod tests {
     }
 
     #[test]
-    fn calculator_source_evaluates_expression_before_and_after_trigger() {
+    fn calculator_source_evaluates_expression_before_trigger() {
         assert_eq!(
             calculator().candidates("3 + 4 ;= + 5"),
+            vec![Candidate::new(
+                Value::raw("7"),
+                '=',
+                Some(Value::raw("printf %s {} | wl-copy"))
+            )
+            .with_source(CandidateSource::Calculator)
+            .with_haystack(";= 3 + 4 = 7")]
+        );
+    }
+
+    #[test]
+    fn calculator_source_reentered_trigger_uses_terms_since_previous_trigger() {
+        assert_eq!(
+            calculator().candidates("3 + 4 ;= + 5 ;="),
             vec![Candidate::new(
                 Value::raw("12"),
                 '=',

@@ -233,8 +233,9 @@ impl App {
     }
 
     pub fn update_input(&mut self, value: Value) {
+        let previous_value = self.state.value();
         self.state.update_input(value);
-        self.refresh_calculator_candidates();
+        self.refresh_calculator_candidates(previous_value.editable_text());
     }
 
     pub fn select_next(&mut self) {
@@ -253,13 +254,13 @@ impl App {
     pub fn press_tab(&mut self) {
         self.record_history_choice();
         self.state.press_tab();
-        self.refresh_calculator_candidates();
+        self.clear_calculator_candidates();
     }
 
     pub fn press_enter(&mut self) -> Option<ExecutionPlan> {
         self.record_history_choice();
         let command = self.state.press_enter();
-        self.refresh_calculator_candidates();
+        self.clear_calculator_candidates();
         command
     }
 
@@ -357,14 +358,23 @@ impl App {
         self.state.feed(candidates);
     }
 
-    fn refresh_calculator_candidates(&mut self) {
-        let candidates = if self.state.mode() == crate::state::InputMode::Search {
-            self.calculator
+    fn refresh_calculator_candidates(&mut self, previous_input: &str) {
+        if self.state.mode() != crate::state::InputMode::Search {
+            self.clear_calculator_candidates();
+            return;
+        }
+
+        let current_value = self.state.value();
+        let current_input = current_value.editable_text();
+        let update = triggered_source_update(previous_input, current_input, '=');
+        let candidates = match update {
+            TriggeredSourceUpdate::Trigger => self
+                .calculator
                 .as_ref()
-                .map(|calculator| calculator.candidates(self.state.value().editable_text()))
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+                .map(|calculator| calculator.candidates(current_input))
+                .unwrap_or_default(),
+            TriggeredSourceUpdate::Clear => Vec::new(),
+            TriggeredSourceUpdate::Preserve => return,
         };
         let candidates = candidates
             .into_iter()
@@ -385,6 +395,40 @@ impl App {
 
         let _ = self.history.record(&candidate);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggeredSourceUpdate {
+    Trigger,
+    Preserve,
+    Clear,
+}
+
+fn triggered_source_update(
+    previous_input: &str,
+    current_input: &str,
+    selector: char,
+) -> TriggeredSourceUpdate {
+    let trigger = format!(";{selector}");
+    let previous_trigger_count = trigger_token_count(previous_input, &trigger);
+    let current_trigger_count = trigger_token_count(current_input, &trigger);
+
+    if current_trigger_count == 0 {
+        return TriggeredSourceUpdate::Clear;
+    }
+
+    if current_trigger_count > previous_trigger_count {
+        return TriggeredSourceUpdate::Trigger;
+    }
+
+    TriggeredSourceUpdate::Preserve
+}
+
+fn trigger_token_count(input: &str, trigger: &str) -> usize {
+    input
+        .split_whitespace()
+        .filter(|term| *term == trigger)
+        .count()
 }
 
 fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Option<String> {
@@ -826,10 +870,49 @@ mod tests {
     }
 
     #[test]
-    fn app_calculator_source_uses_terms_after_trigger() {
+    fn triggered_source_update_fires_when_selector_count_increases() {
+        assert_eq!(
+            triggered_source_update("", "3 + 4 ;= + 5", '='),
+            TriggeredSourceUpdate::Trigger
+        );
+        assert_eq!(
+            triggered_source_update("3 + 4 ;=", "3 + 4 ;= + 5", '='),
+            TriggeredSourceUpdate::Preserve
+        );
+        assert_eq!(
+            triggered_source_update("3 + 4 ;= + 5", "3 + 4 ;= + 5 ;=", '='),
+            TriggeredSourceUpdate::Trigger
+        );
+        assert_eq!(
+            triggered_source_update("3 + 4 ;=", "3 + 4", '='),
+            TriggeredSourceUpdate::Clear
+        );
+    }
+
+    #[test]
+    fn app_calculator_source_does_not_retrigger_after_selector() {
         let mut app = App::with_sources([]);
 
+        app.update_input(Value::raw("3 + 4 ;="));
+        assert_eq!(selected_value(&app), Some(Value::raw("7")));
+
         app.update_input(Value::raw("3 + 4 ;= + 5"));
+
+        assert_eq!(selected_value(&app), None);
+        assert_eq!(app.state().results(), Vec::new());
+    }
+
+    #[test]
+    fn app_calculator_source_retriggers_when_selector_is_entered_again() {
+        let mut app = App::with_sources([]);
+
+        app.update_input(Value::raw("3 + 4 ;="));
+        assert_eq!(selected_value(&app), Some(Value::raw("7")));
+
+        app.update_input(Value::raw("3 + 4 ;= + 5"));
+        assert_eq!(selected_value(&app), None);
+
+        app.update_input(Value::raw("3 + 4 ;= + 5 ;="));
 
         assert_eq!(selected_value(&app), Some(Value::raw("12")));
         assert_eq!(app.state().results()[0].haystack, ";= 3 + 4 + 5 = 12");
@@ -858,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn app_calculator_source_replaces_stale_results() {
+    fn app_calculator_source_clears_results_when_trigger_is_removed() {
         let mut app = App::with_sources([]);
 
         app.update_input(Value::raw("3 + 4 ;="));
