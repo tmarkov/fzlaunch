@@ -5,10 +5,14 @@ use tokio::task::JoinHandle;
 mod calculator;
 mod executables;
 mod filesystem;
+mod plugin;
 
 pub use calculator::Calculator;
 pub use executables::Executables;
 pub use filesystem::FilesystemRoot;
+pub use plugin::{
+    PluginCandidateBatch, PluginCandidateReceiver, PluginCandidateSender, PluginSource,
+};
 
 #[cfg(test)]
 pub type PathExecutables = Executables;

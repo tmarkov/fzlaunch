@@ -108,6 +108,22 @@ impl LauncherState {
         }
     }
 
+    pub fn replace_candidates_from_plugin(
+        &mut self,
+        source_id: &str,
+        candidates: impl IntoIterator<Item = Candidate>,
+    ) {
+        self.candidates.retain(|candidate| {
+            candidate.source() != CandidateSource::Plugin
+                || candidate.source_id() != Some(source_id)
+        });
+        self.candidates.extend(candidates);
+
+        if self.mode == InputMode::Search {
+            self.rerank();
+        }
+    }
+
     pub fn update_input(&mut self, value: Value) {
         self.value = value;
 

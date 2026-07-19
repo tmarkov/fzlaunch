@@ -4,12 +4,15 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::config::{Config, FilesystemSourceConfig};
+use crate::config::{Config, FilesystemSourceConfig, PluginSourceConfig, PluginSourceMode};
 use crate::history::History;
 use crate::model::{Candidate, CandidateSource, ExecutionMode, ExecutionPlan, Queue, Value};
 use crate::preview::{Preview, PreviewOutput, PreviewRunner};
 use crate::shell;
-use crate::sources::{AsyncSource, Calculator, CandidateReceiver, Executables, FilesystemRoot};
+use crate::sources::{
+    AsyncSource, Calculator, CandidateReceiver, Executables, FilesystemRoot, PluginCandidateBatch,
+    PluginCandidateReceiver, PluginCandidateSender, PluginSource,
+};
 use crate::state::LauncherState;
 use crate::ui::tui;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -22,12 +25,21 @@ pub struct App {
     config: Config,
     history: History,
     calculator: Option<Calculator>,
+    triggered_plugins: Vec<TriggeredPluginRuntime>,
     candidate_receiver: CandidateReceiver,
+    plugin_candidate_sender: PluginCandidateSender,
+    plugin_candidate_receiver: PluginCandidateReceiver,
     source_tasks: Vec<tokio::task::JoinHandle<()>>,
     preview_command: Option<String>,
     preview: Preview,
     preview_receiver: tokio::sync::mpsc::Receiver<PreviewOutput>,
     preview_runner: PreviewRunner,
+}
+
+struct TriggeredPluginRuntime {
+    config: PluginSourceConfig,
+    generation: u64,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub fn run() {
@@ -173,6 +185,16 @@ impl App {
             )) as Box<dyn AsyncSource>);
         }
 
+        sources.extend(
+            config
+                .sources
+                .plugins
+                .iter()
+                .filter(|plugin| plugin.enabled && plugin.mode == PluginSourceMode::Startup)
+                .cloned()
+                .map(|plugin| Box::new(PluginSource::new(plugin)) as Box<dyn AsyncSource>),
+        );
+
         let calculator = config
             .sources
             .calculator
@@ -207,10 +229,24 @@ impl App {
         calculator: Option<Calculator>,
     ) -> Self {
         let (sender, candidate_receiver) = tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
+        let (plugin_candidate_sender, plugin_candidate_receiver) =
+            tokio::sync::mpsc::channel(CANDIDATE_CHANNEL_CAPACITY);
         let (preview_sender, preview_receiver) = tokio::sync::mpsc::channel(8);
         let source_tasks = sources
             .into_iter()
             .map(|source| source.stream_candidates(sender.clone()))
+            .collect();
+        let triggered_plugins = config
+            .sources
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.enabled && plugin.mode == PluginSourceMode::Triggered)
+            .cloned()
+            .map(|config| TriggeredPluginRuntime {
+                config,
+                generation: 0,
+                task: None,
+            })
             .collect();
 
         drop(sender);
@@ -223,7 +259,10 @@ impl App {
             config,
             history,
             calculator,
+            triggered_plugins,
             candidate_receiver,
+            plugin_candidate_sender,
+            plugin_candidate_receiver,
             source_tasks,
             preview_command: None,
             preview: Preview::Unavailable,
@@ -236,6 +275,7 @@ impl App {
         let previous_value = self.state.value();
         self.state.update_input(value);
         self.refresh_calculator_candidates(previous_value.editable_text());
+        self.refresh_triggered_plugin_candidates(previous_value.editable_text());
     }
 
     pub fn select_next(&mut self) {
@@ -249,18 +289,21 @@ impl App {
     pub fn press_backtick(&mut self) {
         self.state.press_backtick();
         self.clear_calculator_candidates();
+        self.clear_triggered_plugin_candidates();
     }
 
     pub fn press_tab(&mut self) {
         self.record_history_choice();
         self.state.press_tab();
         self.clear_calculator_candidates();
+        self.clear_triggered_plugin_candidates();
     }
 
     pub fn press_enter(&mut self) -> Option<ExecutionPlan> {
         self.record_history_choice();
         let command = self.state.press_enter();
         self.clear_calculator_candidates();
+        self.clear_triggered_plugin_candidates();
         command
     }
 
@@ -308,9 +351,29 @@ impl App {
         true
     }
 
+    #[cfg(test)]
+    pub async fn receive_plugin_candidates(&mut self) -> bool {
+        let Some(batch) = self.plugin_candidate_receiver.recv().await else {
+            return false;
+        };
+
+        self.apply_plugin_candidates(batch)
+    }
+
     pub fn receive_pending_candidates(&mut self) -> usize {
         let mut batches = 0;
         let mut candidates = Vec::new();
+
+        while batches < MAX_CANDIDATE_BATCHES_PER_TICK {
+            match self.plugin_candidate_receiver.try_recv() {
+                Ok(batch) => {
+                    self.apply_plugin_candidates(batch);
+                    batches += 1;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
 
         while batches < MAX_CANDIDATE_BATCHES_PER_TICK {
             match self.candidate_receiver.try_recv() {
@@ -358,6 +421,23 @@ impl App {
         self.state.feed(candidates);
     }
 
+    fn apply_plugin_candidates(&mut self, batch: PluginCandidateBatch) -> bool {
+        let Some(runtime) = self
+            .triggered_plugins
+            .iter()
+            .find(|runtime| runtime.config.name == batch.source_id)
+        else {
+            return false;
+        };
+
+        if runtime.generation != batch.generation {
+            return false;
+        }
+
+        self.feed_candidates(batch.candidates);
+        true
+    }
+
     fn refresh_calculator_candidates(&mut self, previous_input: &str) {
         if self.state.mode() != crate::state::InputMode::Search {
             self.clear_calculator_candidates();
@@ -386,6 +466,70 @@ impl App {
     fn clear_calculator_candidates(&mut self) {
         self.state
             .replace_candidates_from_source(CandidateSource::Calculator, []);
+    }
+
+    fn refresh_triggered_plugin_candidates(&mut self, previous_input: &str) {
+        if self.state.mode() != crate::state::InputMode::Search {
+            self.clear_triggered_plugin_candidates();
+            return;
+        }
+
+        let current_value = self.state.value();
+        let current_input = current_value.editable_text().to_string();
+        for index in 0..self.triggered_plugins.len() {
+            let selector = self.triggered_plugins[index].config.selector;
+            match triggered_source_update(previous_input, &current_input, selector) {
+                TriggeredSourceUpdate::Trigger => {
+                    let args = triggered_source_args(&current_input, selector);
+                    self.restart_triggered_plugin(index, args);
+                }
+                TriggeredSourceUpdate::Clear => self.stop_triggered_plugin(index),
+                TriggeredSourceUpdate::Preserve => {}
+            }
+        }
+    }
+
+    fn restart_triggered_plugin(&mut self, index: usize, args: Vec<String>) {
+        let (source_id, config, generation) = {
+            let runtime = &mut self.triggered_plugins[index];
+            if let Some(task) = runtime.task.take() {
+                task.abort();
+            }
+            runtime.generation = runtime.generation.saturating_add(1);
+            (
+                runtime.config.name.clone(),
+                runtime.config.clone(),
+                runtime.generation,
+            )
+        };
+
+        self.state.replace_candidates_from_plugin(&source_id, []);
+        let task = PluginSource::stream_triggered_candidates(
+            config,
+            args,
+            generation,
+            self.plugin_candidate_sender.clone(),
+        );
+        self.triggered_plugins[index].task = Some(task);
+    }
+
+    fn stop_triggered_plugin(&mut self, index: usize) {
+        let source_id = {
+            let runtime = &mut self.triggered_plugins[index];
+            if let Some(task) = runtime.task.take() {
+                task.abort();
+            }
+            runtime.generation = runtime.generation.saturating_add(1);
+            runtime.config.name.clone()
+        };
+
+        self.state.replace_candidates_from_plugin(&source_id, []);
+    }
+
+    fn clear_triggered_plugin_candidates(&mut self) {
+        for index in 0..self.triggered_plugins.len() {
+            self.stop_triggered_plugin(index);
+        }
     }
 
     fn record_history_choice(&mut self) {
@@ -431,6 +575,21 @@ fn trigger_token_count(input: &str, trigger: &str) -> usize {
         .count()
 }
 
+fn triggered_source_args(input: &str, selector: char) -> Vec<String> {
+    let trigger = format!(";{selector}");
+    let terms = input.split_whitespace().collect::<Vec<_>>();
+    let Some(trigger_index) = terms.iter().rposition(|term| *term == trigger) else {
+        return Vec::new();
+    };
+
+    terms[..trigger_index]
+        .iter()
+        .copied()
+        .filter(|term| *term != trigger)
+        .map(str::to_string)
+        .collect()
+}
+
 fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Option<String> {
     let candidate = candidate?;
     let preview_command = match candidate.source() {
@@ -441,6 +600,7 @@ fn selected_preview_command(candidate: Option<Candidate>, config: &Config) -> Op
             &config.sources.filesystem,
         ),
         CandidateSource::Calculator => None,
+        CandidateSource::Plugin => None,
         CandidateSource::History => None,
     }?;
 
@@ -531,6 +691,11 @@ impl Drop for App {
         for task in &self.source_tasks {
             task.abort();
         }
+        for runtime in &mut self.triggered_plugins {
+            if let Some(task) = runtime.task.take() {
+                task.abort();
+            }
+        }
     }
 }
 
@@ -538,6 +703,7 @@ impl Drop for App {
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use tokio::task::JoinHandle;
@@ -545,7 +711,8 @@ mod tests {
 
     use super::*;
     use crate::config::{
-        CalculatorSourceConfig, Config, FilesystemSourceConfig, PathSourceConfig, SourceConfig,
+        CalculatorSourceConfig, Config, FilesystemSourceConfig, PathSourceConfig,
+        PluginSourceConfig, PluginSourceMode, SourceConfig,
     };
     use crate::model::Candidate;
     use crate::sources::CandidateSender;
@@ -634,6 +801,33 @@ mod tests {
         TempDir::new(name)
     }
 
+    fn write_plugin_script(dir: &TempDir, text: impl AsRef<[u8]>) -> PathBuf {
+        let path = dir.join("plugin");
+        fs::write(&path, text).expect("plugin script should be written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("plugin script should be executable");
+        path
+    }
+
+    fn plugin_config(path: PathBuf, mode: PluginSourceMode) -> PluginSourceConfig {
+        plugin_config_with_selector(path, mode, 's')
+    }
+
+    fn plugin_config_with_selector(
+        path: PathBuf,
+        mode: PluginSourceMode,
+        selector: char,
+    ) -> PluginSourceConfig {
+        PluginSourceConfig {
+            name: "content".to_string(),
+            enabled: true,
+            path,
+            selector,
+            mode,
+            direct_action: Some(crate::model::Action::detached(Value::raw("xdg-open {}"))),
+        }
+    }
+
     fn selected_value(app: &App) -> Option<Value> {
         app.state()
             .selected()
@@ -703,6 +897,50 @@ mod tests {
             app.state().results().len(),
             MAX_CANDIDATE_BATCHES_PER_TICK + 2
         );
+    }
+
+    #[tokio::test]
+    async fn app_prioritizes_triggered_plugin_batches_over_startup_batches() {
+        let root = temp_app_dir("app-prioritizes-triggered-plugin-batches");
+        let batches = (0..MAX_CANDIDATE_BATCHES_PER_TICK + 2).map(|index| {
+            vec![Candidate::new(
+                Value::raw(format!("command-{index}")),
+                'c',
+                None,
+            )]
+        });
+        let mut app = App::with_sources_and_config(
+            [Box::new(BatchSource::new(batches)) as Box<dyn AsyncSource>],
+            Config {
+                sources: SourceConfig {
+                    plugins: vec![plugin_config_with_selector(
+                        root.join("unused-plugin"),
+                        PluginSourceMode::Triggered,
+                        'r',
+                    )],
+                    ..SourceConfig::default()
+                },
+            },
+        );
+        app.state.update_input(Value::raw("invoice ;r"));
+        app.triggered_plugins[0].generation = 1;
+        app.plugin_candidate_sender
+            .try_send(PluginCandidateBatch {
+                source_id: "content".to_string(),
+                generation: 1,
+                candidates: vec![Candidate::new(Value::raw("invoice.pdf"), 'r', None)
+                    .with_source(CandidateSource::Plugin)
+                    .with_source_id("content")
+                    .with_haystack(";r invoice paid")],
+            })
+            .expect("plugin batch should fit in channel");
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            app.receive_pending_candidates(),
+            MAX_CANDIDATE_BATCHES_PER_TICK
+        );
+        assert_eq!(selected_value(&app), Some(Value::raw("invoice.pdf")));
     }
 
     #[tokio::test]
@@ -887,6 +1125,189 @@ mod tests {
             triggered_source_update("3 + 4 ;=", "3 + 4", '='),
             TriggeredSourceUpdate::Clear
         );
+    }
+
+    #[test]
+    fn triggered_source_args_use_terms_before_latest_selector() {
+        assert_eq!(
+            triggered_source_args("alpha beta ;s gamma ;s", 's'),
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn app_startup_plugin_feeds_jsonl_candidates() {
+        let root = temp_app_dir("app-startup-plugin");
+        let script = write_plugin_script(
+            &root,
+            r#"#!/bin/sh
+printf '%s\n' '{"value":"startup-result","haystack":"startup result"}'
+"#,
+        );
+        let mut app = App::start_with_config(
+            root.path().to_path_buf(),
+            "",
+            Config {
+                sources: SourceConfig {
+                    path: PathSourceConfig {
+                        enabled: false,
+                        ..PathSourceConfig::default()
+                    },
+                    filesystem: FilesystemSourceConfig {
+                        enabled: false,
+                        ..FilesystemSourceConfig::default()
+                    },
+                    calculator: CalculatorSourceConfig {
+                        enabled: false,
+                        ..CalculatorSourceConfig::default()
+                    },
+                    plugins: vec![plugin_config(script, PluginSourceMode::Startup)],
+                },
+            },
+        );
+
+        assert!(app.receive_candidates().await);
+        app.update_input(Value::raw("startup ;s"));
+
+        assert_eq!(selected_value(&app), Some(Value::raw("startup-result")));
+    }
+
+    #[tokio::test]
+    async fn app_triggered_plugin_receives_prompt_args() {
+        let root = temp_app_dir("app-triggered-plugin-args");
+        let script = write_plugin_script(
+            &root,
+            r#"#!/bin/sh
+printf '{"value":"%s-%s","haystack":"%s %s"}\n' "$1" "$2" "$1" "$2"
+"#,
+        );
+        let mut app = App::with_sources_and_config(
+            [],
+            Config {
+                sources: SourceConfig {
+                    plugins: vec![plugin_config(script, PluginSourceMode::Triggered)],
+                    ..SourceConfig::default()
+                },
+            },
+        );
+
+        app.update_input(Value::raw("memory leak ;s"));
+
+        assert!(
+            time::timeout(Duration::from_secs(1), app.receive_plugin_candidates())
+                .await
+                .expect("plugin should respond before timeout")
+        );
+        assert_eq!(selected_value(&app), Some(Value::raw("memory-leak")));
+    }
+
+    #[tokio::test]
+    async fn app_triggered_plugin_applies_configured_selector_to_plugin_haystack() {
+        let root = temp_app_dir("app-triggered-plugin-configured-selector");
+        let script = write_plugin_script(
+            &root,
+            r#"#!/bin/sh
+printf '%s\n' '{"value":"invoice.pdf","haystack":"invoice paid"}'
+"#,
+        );
+        let mut app = App::with_sources_and_config(
+            [],
+            Config {
+                sources: SourceConfig {
+                    plugins: vec![plugin_config_with_selector(
+                        script,
+                        PluginSourceMode::Triggered,
+                        'r',
+                    )],
+                    ..SourceConfig::default()
+                },
+            },
+        );
+
+        app.update_input(Value::raw("invoice ;r"));
+
+        assert!(
+            time::timeout(Duration::from_secs(1), app.receive_plugin_candidates())
+                .await
+                .expect("plugin should respond before timeout")
+        );
+        assert_eq!(selected_value(&app), Some(Value::raw("invoice.pdf")));
+        assert_eq!(app.state().results()[0].haystack, ";r invoice paid");
+    }
+
+    #[tokio::test]
+    async fn app_triggered_plugin_retrigger_stops_previous_invocation() {
+        let root = temp_app_dir("app-triggered-plugin-cancel");
+        let stale_marker = root.join("stale-marker");
+        let script = write_plugin_script(
+            &root,
+            format!(
+                r#"#!/bin/sh
+if [ "$2" = "fast" ]; then
+  printf '%s\n' '{{"value":"fast","haystack":"slow fast"}}'
+else
+  sleep 0.2
+  printf stale > "{}"
+  printf '%s\n' '{{"value":"slow","haystack":"slow"}}'
+fi
+"#,
+                stale_marker.to_str().expect("path should be utf-8")
+            ),
+        );
+        let mut app = App::with_sources_and_config(
+            [],
+            Config {
+                sources: SourceConfig {
+                    plugins: vec![plugin_config(script, PluginSourceMode::Triggered)],
+                    ..SourceConfig::default()
+                },
+            },
+        );
+
+        app.update_input(Value::raw("slow ;s"));
+        app.update_input(Value::raw("slow ;s fast ;s"));
+
+        assert!(
+            time::timeout(Duration::from_secs(1), app.receive_plugin_candidates())
+                .await
+                .expect("plugin should respond before timeout")
+        );
+        assert_eq!(selected_value(&app), Some(Value::raw("fast")));
+
+        time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(app.receive_pending_candidates(), 0);
+        assert!(
+            !stale_marker.exists(),
+            "re-trigger should stop the previous plugin process before it writes"
+        );
+        assert_eq!(selected_value(&app), Some(Value::raw("fast")));
+    }
+
+    #[tokio::test]
+    async fn app_triggered_plugin_clear_rejects_queued_stale_output() {
+        let root = temp_app_dir("app-triggered-plugin-clear-stale");
+        let script = root.join("plugin");
+        let mut app = App::with_sources_and_config(
+            [],
+            Config {
+                sources: SourceConfig {
+                    plugins: vec![plugin_config(script, PluginSourceMode::Triggered)],
+                    ..SourceConfig::default()
+                },
+            },
+        );
+
+        app.update_input(Value::raw("query ;s"));
+        app.update_input(Value::raw("query"));
+
+        assert!(!app.apply_plugin_candidates(PluginCandidateBatch {
+            source_id: "content".to_string(),
+            generation: 1,
+            candidates: vec![Candidate::new(Value::raw("stale"), 's', None)
+                .with_source(CandidateSource::Plugin)
+                .with_source_id("content")],
+        }));
+        assert_eq!(selected_value(&app), None);
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub struct SourceConfig {
     pub path: PathSourceConfig,
     pub filesystem: FilesystemSourceConfig,
     pub calculator: CalculatorSourceConfig,
+    pub plugins: Vec<PluginSourceConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,22 @@ pub struct FilesystemSourceConfig {
 pub struct CalculatorSourceConfig {
     pub enabled: bool,
     pub direct_action: Action,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSourceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub path: PathBuf,
+    pub selector: char,
+    pub mode: PluginSourceMode,
+    pub direct_action: Option<Action>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginSourceMode {
+    Startup,
+    Triggered,
 }
 
 #[derive(Debug)]
@@ -191,6 +208,13 @@ impl From<ConfigFile> for Config {
                     .calculator
                     .map(CalculatorSourceConfig::from)
                     .unwrap_or(defaults.sources.calculator),
+                plugins: sources
+                    .plugins
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, plugin)| PluginSourceConfig::from_file(index, plugin))
+                    .collect(),
             },
         }
     }
@@ -294,6 +318,40 @@ impl From<CalculatorSourceConfigFile> for CalculatorSourceConfig {
     }
 }
 
+impl PluginSourceConfig {
+    fn from_file(index: usize, file: PluginSourceConfigFile) -> Option<Self> {
+        let path = PathBuf::from(file.path?);
+        let selector = parse_selector(&file.selector?)?;
+        let name = file
+            .name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("plugin-{}", index + 1));
+        let mode = file
+            .mode
+            .as_deref()
+            .and_then(parse_plugin_source_mode)
+            .unwrap_or(PluginSourceMode::Startup);
+        let direct_action = file.direct_action.map(|value| {
+            Action::new(
+                Value::raw(value),
+                file.direct_action_execution
+                    .as_deref()
+                    .and_then(parse_execution_mode)
+                    .unwrap_or(ExecutionMode::Foreground),
+            )
+        });
+
+        Some(Self {
+            name,
+            enabled: file.enabled.unwrap_or(true),
+            path,
+            selector,
+            mode,
+            direct_action,
+        })
+    }
+}
+
 fn preview_command(configured: Option<String>, default: Option<Value>) -> Option<Value> {
     match configured {
         Some(command) if command.is_empty() => None,
@@ -346,6 +404,7 @@ struct SourceConfigFile {
     path: Option<PathSourceConfigFile>,
     filesystem: Option<FilesystemSourceConfigFile>,
     calculator: Option<CalculatorSourceConfigFile>,
+    plugins: Option<Vec<PluginSourceConfigFile>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -375,6 +434,31 @@ struct CalculatorSourceConfigFile {
     enabled: Option<bool>,
     direct_action: Option<String>,
     direct_action_execution: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PluginSourceConfigFile {
+    name: Option<String>,
+    enabled: Option<bool>,
+    path: Option<String>,
+    selector: Option<String>,
+    mode: Option<String>,
+    direct_action: Option<String>,
+    direct_action_execution: Option<String>,
+}
+
+fn parse_selector(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let selector = chars.next()?;
+    chars.next().is_none().then_some(selector)
+}
+
+fn parse_plugin_source_mode(mode: &str) -> Option<PluginSourceMode> {
+    match mode {
+        "startup" => Some(PluginSourceMode::Startup),
+        "triggered" => Some(PluginSourceMode::Triggered),
+        _ => None,
+    }
 }
 
 fn parse_execution_mode(mode: &str) -> Option<ExecutionMode> {
@@ -434,6 +518,7 @@ mod tests {
                         enabled: true,
                         direct_action: Action::foreground(Value::raw("printf %s {} | wl-copy")),
                     },
+                    plugins: Vec::new(),
                 },
             }
         );
@@ -489,10 +574,19 @@ archive_preview_command = "show-archive {}"
 media_preview_command = "show-media {}"
 binary_preview_command = "show-binary {}"
 
-[sources.calculator]
-enabled = false
-direct_action = "copy-result {}"
-"#,
+	[sources.calculator]
+	enabled = false
+	direct_action = "copy-result {}"
+
+	[[sources.plugins]]
+	name = "content"
+	enabled = true
+	path = "/home/me/bin/content-search"
+	selector = "s"
+	mode = "triggered"
+	direct_action = "xdg-open {}"
+	direct_action_execution = "detached"
+	"#,
         )
         .expect("test config should be written");
 
@@ -520,6 +614,14 @@ direct_action = "copy-result {}"
                         enabled: false,
                         direct_action: Action::foreground(Value::raw("copy-result {}")),
                     },
+                    plugins: vec![PluginSourceConfig {
+                        name: "content".to_string(),
+                        enabled: true,
+                        path: PathBuf::from("/home/me/bin/content-search"),
+                        selector: 's',
+                        mode: PluginSourceMode::Triggered,
+                        direct_action: Some(Action::detached(Value::raw("xdg-open {}"))),
+                    }],
                 },
             }
         );
@@ -548,6 +650,7 @@ preview_command = "help {}"
                     },
                     filesystem: FilesystemSourceConfig::default(),
                     calculator: CalculatorSourceConfig::default(),
+                    plugins: Vec::new(),
                 },
             }
         );

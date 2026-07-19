@@ -321,6 +321,7 @@ fn parse_source(source: &str) -> Option<CandidateSource> {
         "path" => Some(CandidateSource::PathExecutable),
         "filesystem" => Some(CandidateSource::FilesystemPath),
         "calculator" => Some(CandidateSource::Calculator),
+        "plugin" => Some(CandidateSource::Plugin),
         "history" => Some(CandidateSource::History),
         _ => None,
     }
@@ -332,6 +333,7 @@ fn source_name(source: CandidateSource) -> &'static str {
         CandidateSource::PathExecutable => "path",
         CandidateSource::FilesystemPath => "filesystem",
         CandidateSource::Calculator => "calculator",
+        CandidateSource::Plugin => "plugin",
         CandidateSource::History => "history",
     }
 }

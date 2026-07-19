@@ -37,6 +37,7 @@ pub struct Candidate {
     selector: char,
     direct_action: Option<Action>,
     source: CandidateSource,
+    source_id: Option<String>,
     preference_score_millis: u32,
 }
 
@@ -46,6 +47,7 @@ pub enum CandidateSource {
     PathExecutable,
     FilesystemPath,
     Calculator,
+    Plugin,
     History,
 }
 
@@ -272,6 +274,7 @@ impl Candidate {
             selector,
             direct_action,
             source: CandidateSource::Generic,
+            source_id: None,
             preference_score_millis: 0,
         }
         .with_haystack(haystack)
@@ -284,6 +287,11 @@ impl Candidate {
 
     pub fn with_source(mut self, source: CandidateSource) -> Self {
         self.source = source;
+        self
+    }
+
+    pub fn with_source_id(mut self, source_id: impl Into<String>) -> Self {
+        self.source_id = Some(source_id.into());
         self
     }
 
@@ -316,6 +324,10 @@ impl Candidate {
 
     pub(crate) fn source(&self) -> CandidateSource {
         self.source
+    }
+
+    pub(crate) fn source_id(&self) -> Option<&str> {
+        self.source_id.as_deref()
     }
 
     pub(crate) fn preference_score_millis(&self) -> u32 {

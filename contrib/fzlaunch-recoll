@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+"""Recoll content-search plugin for fzlaunch.
+
+The plugin is intended for triggered use. fzlaunch passes the search terms as
+command-line arguments and reads JSONL candidates from stdout.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import sys
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+
+DEFAULT_LIMIT = 50
+SNIPPET_MAX_CHARS = 240
+SNIPPET_CONTEXT_WORDS = 6
+
+
+def main(argv: list[str]) -> int:
+    query_text = " ".join(argv).strip()
+    if not query_text:
+        return 0
+
+    try:
+        from recoll import recoll
+    except ImportError:
+        print(
+            "fzlaunch-recoll: missing Recoll Python package "
+            "(install python3-recoll or your distribution equivalent)",
+            file=sys.stderr,
+        )
+        return 127
+
+    limit = positive_int_env("FZLAUNCH_RECOLL_LIMIT", DEFAULT_LIMIT)
+
+    try:
+        db = connect_recoll(recoll)
+        db.setAbstractParams(
+            maxchars=SNIPPET_MAX_CHARS,
+            contextwords=SNIPPET_CONTEXT_WORDS,
+        )
+        query = db.query()
+        result_count = query.execute(query_text, collapseduplicates=True)
+
+        for _ in range(min(result_count, limit)):
+            try:
+                doc = query.fetchone()
+            except StopIteration:
+                break
+
+            candidate = candidate_from_doc(db, query, doc)
+            if candidate is None:
+                continue
+            print(json.dumps(candidate, ensure_ascii=False), flush=True)
+    except BrokenPipeError:
+        return 0
+    except Exception as error:
+        print(f"fzlaunch-recoll: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def positive_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def extra_dbs_from_env() -> list[str] | None:
+    value = os.environ.get("FZLAUNCH_RECOLL_EXTRA_DBS")
+    if not value:
+        return None
+
+    paths = [path for path in value.split(os.pathsep) if path]
+    return paths or None
+
+
+def connect_recoll(recoll: Any) -> Any:
+    kwargs: dict[str, Any] = {}
+    confdir = os.environ.get("RECOLL_CONFDIR")
+    extra_dbs = extra_dbs_from_env()
+
+    if confdir:
+        kwargs["confdir"] = confdir
+    if extra_dbs:
+        kwargs["extra_dbs"] = extra_dbs
+
+    return recoll.connect(**kwargs)
+
+
+def candidate_from_doc(db: Any, query: Any, doc: Any) -> dict[str, str] | None:
+    url = field(doc, "url")
+    filename = field(doc, "filename")
+    title = field(doc, "title")
+    value = openable_value(url, filename)
+
+    if not value:
+        return None
+
+    snippet = snippet_for_doc(db, query, doc)
+    label = title or filename or os.path.basename(value) or value
+    haystack = compact_whitespace(f"{label} {value} {url} {snippet}")
+
+    return {
+        "value": value,
+        "insertion_policy": "escaped",
+        "haystack": haystack,
+    }
+
+
+def openable_value(url: str, filename: str) -> str:
+    if url:
+        return file_uri_to_path(url) or url
+    return filename
+
+
+def file_uri_to_path(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme != "file":
+        return None
+    if parsed.netloc and parsed.netloc != "localhost":
+        return None
+
+    return unquote(parsed.path)
+
+
+def field(doc: Any, name: str) -> str:
+    value = getattr(doc, name, "")
+    if value is None:
+        return ""
+    return str(value)
+
+
+def snippet_for_doc(db: Any, query: Any, doc: Any) -> str:
+    for abstract in (
+        lambda: query.makedocabstract(doc),
+        lambda: db.makeDocAbstract(doc, query),
+    ):
+        try:
+            return clean_markup(str(abstract()))
+        except Exception:
+            continue
+    return ""
+
+
+def clean_markup(value: str) -> str:
+    value = re.sub(r"<[^>]*>", " ", value)
+    return compact_whitespace(html.unescape(value))
+
+
+def compact_whitespace(value: str) -> str:
+    return " ".join(value.split())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
